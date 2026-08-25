@@ -1,6 +1,6 @@
 import { TopNav } from "@/components/TopNav";
 
-export default function AccountsLayout({ children }: { children: React.ReactNode }) {
+export default function OutboxLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="container">
       <TopNav />

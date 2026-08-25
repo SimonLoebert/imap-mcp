@@ -20,7 +20,7 @@ function unauthorized(description: string) {
 }
 
 async function authenticate(req: Request): Promise<
-  | { ok: true; userId: string }
+  | { ok: true; userId: string; clientId: string }
   | { ok: false; response: NextResponse }
 > {
   const header = req.headers.get("authorization");
@@ -32,14 +32,14 @@ async function authenticate(req: Request): Promise<
   if (!row) {
     return { ok: false, response: unauthorized("invalid or expired token") };
   }
-  return { ok: true, userId: row.userId };
+  return { ok: true, userId: row.userId, clientId: row.clientId };
 }
 
 async function handle(req: Request) {
   const auth = await authenticate(req);
   if (!auth.ok) return auth.response;
 
-  const server = buildMcpServer({ userId: auth.userId });
+  const server = buildMcpServer({ userId: auth.userId, clientId: auth.clientId });
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,

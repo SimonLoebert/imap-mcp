@@ -10,6 +10,11 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { WritingStyle } from "@/lib/writing-style";
+import type {
+  PendingMessageKind,
+  PendingMessagePayload,
+  PendingMessageStatus,
+} from "@/lib/outbox-types";
 
 export const users = pgTable(
   "users",
@@ -43,11 +48,59 @@ export const mailAccounts = pgTable(
     smtpPasswordEnc: text("smtp_password_enc").notNull(),
     signatureHtml: text("signature_html"),
     writingStyle: jsonb("writing_style").$type<WritingStyle>(),
+    /**
+     * Human-in-the-loop switch. When true (the default), messages the MCP
+     * client asks to send are parked in the outbox and only leave the server
+     * once the account owner approves them in the web UI.
+     */
+    requireSendApproval: boolean("require_send_approval").notNull().default(true),
     isDefault: boolean("is_default").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [index("mail_accounts_user_id_idx").on(t.userId)],
+);
+
+/**
+ * Outgoing messages queued by an MCP client and waiting for the account
+ * owner's decision. The full MIME input (including base64 attachments) lives
+ * in `payload` so the message can be sent verbatim after approval.
+ */
+export const pendingMessages = pgTable(
+  "pending_messages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => mailAccounts.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<PendingMessageKind>().notNull(),
+    status: text("status").$type<PendingMessageStatus>().notNull().default("pending"),
+    subject: text("subject").notNull(),
+    toAddresses: text("to_addresses").array().notNull(),
+    ccAddresses: text("cc_addresses").array().notNull().default([]),
+    bccAddresses: text("bcc_addresses").array().notNull().default([]),
+    payload: jsonb("payload").$type<PendingMessagePayload>().notNull(),
+    /** Source message of a reply — kept for the reviewer's context only. */
+    replyFolder: text("reply_folder"),
+    replyUid: integer("reply_uid"),
+    /** OAuth client that requested the send, when known. */
+    requestedByClientId: text("requested_by_client_id"),
+    decisionNote: text("decision_note"),
+    sendResult: jsonb("send_result"),
+    errorMessage: text("error_message"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index("pending_messages_user_status_idx").on(t.userId, t.status),
+    index("pending_messages_account_id_idx").on(t.accountId),
+    index("pending_messages_created_at_idx").on(t.createdAt),
+  ],
 );
 
 export const oauthClients = pgTable("oauth_clients", {
@@ -122,6 +175,8 @@ export const calendarAccounts = pgTable(
 );
 
 export type User = typeof users.$inferSelect;
+export type PendingMessage = typeof pendingMessages.$inferSelect;
+export type NewPendingMessage = typeof pendingMessages.$inferInsert;
 export type MailAccount = typeof mailAccounts.$inferSelect;
 export type NewMailAccount = typeof mailAccounts.$inferInsert;
 export type CalendarAccount = typeof calendarAccounts.$inferSelect;

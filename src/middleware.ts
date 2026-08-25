@@ -3,8 +3,12 @@ import { NextResponse } from "next/server";
 
 const isProtectedRoute = createRouteMatcher([
   "/accounts(.*)",
+  "/calendars(.*)",
+  "/outbox(.*)",
   "/connect(.*)",
   "/api/accounts(.*)",
+  "/api/calendar-accounts(.*)",
+  "/api/outbox(.*)",
   "/api/oauth/authorize(.*)",
 ]);
 

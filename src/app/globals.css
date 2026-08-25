@@ -534,3 +534,32 @@ kbd {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+.outbox-card {
+  scroll-margin-top: 24px;
+}
+.outbox-card:target {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+.outbox-body {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card-2);
+  padding: 12px 14px;
+  max-height: 340px;
+  overflow: auto;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.outbox-body img {
+  max-width: 100%;
+  height: auto;
+}
+.outbox-body-text {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

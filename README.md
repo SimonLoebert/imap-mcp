@@ -30,8 +30,9 @@ One container, one domain, your server, your keys.
 - 🔑 **OAuth 2.1** (Authorization Code + PKCE) with **Dynamic Client Registration** (RFC 7591)
 - 📬 Unlimited IMAP/SMTP accounts per user, each with its own **HTML signature** (Tiptap editor, DOMPurify-sanitized)
 - 🗓️ Unlimited **CalDAV calendar accounts** per user — list/read/create/update/delete events and find free slots, fully timezone-aware (TZID + DST-correct recurrences)
+- ✋ **Human-in-the-loop approvals** — outgoing mail is parked in an approval queue and only reaches SMTP after you release it in the web UI (per-account, on by default)
 - 🔒 Credentials encrypted with **AES-256-GCM**; OAuth tokens stored as **SHA-256** hashes only
-- 🧰 **27 MCP tools**: 19 email tools (list/read/search/send/reply/flag/move/folder ops) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`)
+- 🧰 **30 MCP tools**: 22 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`)
 - 🧪 **Test connection from the list** (IMAP `NOOP` + SMTP `VERIFY`, CalDAV principal-discovery) with per-account status badges and actionable error hints
 - ⚡ **Provider presets** on account creation: Gmail, Outlook / Microsoft 365, iCloud, Yahoo, Fastmail, OVH for email — iCloud, Fastmail, Nextcloud, OVH, Baïkal/generic for calendars
 - ⚠️ **Live port/SSL consistency warnings** — catches the `wrong version number` trap before it happens
@@ -129,6 +130,23 @@ App is now available at `http://localhost:3000`.
 3. Use a provider **app password** (Apple, Fastmail, Nextcloud all expose one). Google Calendar **is not supported in v1** because Google requires OAuth 2.0 for CalDAV — see *Out of scope* below.
 4. Save, then click **Test connection**: the badge shows the number of calendars discovered.
 
+### 3c. Approve outgoing mail
+
+Every new account is created with **"Require my approval before anything is sent"** enabled.
+With it on, `send_message` / `reply_message` never touch SMTP: the draft is stored in your
+approval queue and the MCP client gets back `status: "pending_approval"` with an
+`approval_url`.
+
+1. Open **`/outbox`** (the header link shows a badge with the number of messages waiting).
+2. Review sender, recipients, subject, body (HTML and plain text) and attachments.
+3. **Approve & send** hands the message to SMTP right there, **Reject** discards it. An
+   optional note is stored in the history and is visible to the MCP client.
+4. Undecided messages expire after `OUTBOX_APPROVAL_TTL_HOURS` (72 by default) and can
+   never be sent afterwards.
+
+Turn the requirement off per account in the account form if you want a specific mailbox to
+send without asking — the warning shown there is worth reading first.
+
 ### 4. Connect your MCP client
 
 Every signed-in user has a built-in guide at **`/connect`** with tabbed setup instructions
@@ -225,8 +243,16 @@ missing, install it in the container: `docker compose exec app npm i esbuild --n
 
 | Tool              | Purpose                                                                 |
 | ----------------- | ----------------------------------------------------------------------- |
-| `send_message`    | Send via the account's SMTP, appending the HTML signature and base64 attachments; the sent copy is IMAP-appended to the Sent folder (skipped on Gmail, which saves it automatically). |
-| `reply_message`   | Reply preserving `In-Reply-To` / `References`; same Sent-folder behavior as `send_message`. |
+| `send_message`    | Send via the account's SMTP, appending the HTML signature and base64 attachments; the sent copy is IMAP-appended to the Sent folder (skipped on Gmail, which saves it automatically). Queued for approval instead of sent when the account requires it. |
+| `reply_message`   | Reply preserving `In-Reply-To` / `References`; same Sent-folder and approval behavior as `send_message`. |
+
+### Approvals (human-in-the-loop)
+
+| Tool                      | Purpose                                                                 |
+| ------------------------- | ----------------------------------------------------------------------- |
+| `list_pending_messages`   | List queued messages, filtered by status (defaults to the ones still awaiting a decision) |
+| `get_pending_message`     | Full body, recipients and current status of one queued message — this is how the client learns what you decided |
+| `cancel_pending_message`  | Let the client withdraw its own draft before you decide on it            |
 
 ### Flags & triage
 
@@ -297,7 +323,13 @@ users(id, clerk_user_id UNIQUE)
 mail_accounts(id, user_id, label, email,
               imap_{host,port,secure,user,password_enc},
               smtp_{host,port,secure,user,password_enc},
-              signature_html, writing_style, is_default)
+              signature_html, writing_style,
+              require_send_approval, is_default)
+pending_messages(id, user_id, account_id, kind, status,
+                 subject, to_addresses[], cc_addresses[], bcc_addresses[],
+                 payload, reply_folder, reply_uid, requested_by_client_id,
+                 decision_note, send_result, error_message,
+                 expires_at, decided_at, sent_at, created_at)
 calendar_accounts(id, user_id, label,
                   caldav_url, username, password_enc,
                   default_calendar_url, color, is_default)
@@ -317,6 +349,9 @@ oauth_tokens(id, access_token_hash UNIQUE, refresh_token_hash,
 - Signatures pass through DOMPurify server-side before storage *and* before being injected into outgoing mail.
 - Attachment download URLs are HMAC-SHA256-signed (separate key derived from `MCP_MASTER_KEY`) and expire in 15 minutes. They encode `{userId, accountId, folder, uid, index, exp}` — tampering is rejected in constant time, expired tokens are refused. Files are never written to disk on the MCP server; each request streams directly from IMAP and is garbage-collected after the response.
 - The `/api/mcp` endpoint always returns `WWW-Authenticate: Bearer resource_metadata="…"` on 401, per RFC 9728.
+- Approval is enforced server-side in the single code path every outgoing message goes through. An MCP client can *request* a review (`request_approval: true`) but has no way to switch off an account's own requirement, and approving is only possible from the Clerk-authenticated web UI — never through MCP.
+- The pending → sending transition is a guarded `UPDATE … WHERE status = 'pending'`, so a double click or two open tabs can never hand the same message to SMTP twice.
+- Queued HTML bodies are DOMPurify-sanitized before they are rendered in the approval preview.
 
 ## Out of scope (v1)
 

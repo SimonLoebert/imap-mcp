@@ -17,6 +17,7 @@ export const accountCreateSchema = z.object({
   smtpPassword: z.string().min(1),
   signatureHtml: z.string().max(20000).optional().nullable(),
   writingStyle: writingStyleSchema.optional().nullable(),
+  requireSendApproval: z.boolean().optional(),
   isDefault: z.boolean().optional(),
 });
 
