@@ -70,6 +70,9 @@ export async function PATCH(
     patch.signatureHtml = input.signatureHtml ? sanitizeSignatureHtml(input.signatureHtml) : null;
   }
   if (input.writingStyle !== undefined) patch.writingStyle = input.writingStyle ?? null;
+  if (input.requireSendApproval !== undefined) {
+    patch.requireSendApproval = input.requireSendApproval;
+  }
   if (input.isDefault !== undefined) patch.isDefault = input.isDefault;
 
   await db

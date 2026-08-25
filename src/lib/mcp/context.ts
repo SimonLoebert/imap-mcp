@@ -14,6 +14,8 @@ import {
 
 export interface McpContext {
   userId: string;
+  /** OAuth client that presented the access token, recorded on approval requests. */
+  clientId?: string | null;
 }
 
 export async function listUserAccounts(userId: string) {
@@ -24,6 +26,7 @@ export async function listUserAccounts(userId: string) {
       email: mailAccounts.email,
       fromName: mailAccounts.fromName,
       writingStyle: mailAccounts.writingStyle,
+      requireSendApproval: mailAccounts.requireSendApproval,
       isDefault: mailAccounts.isDefault,
     })
     .from(mailAccounts)

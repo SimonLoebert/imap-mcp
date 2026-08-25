@@ -22,8 +22,26 @@ import {
   searchMessages,
   setMessageFlags,
 } from "@/lib/imap";
-import type { OutgoingAttachment } from "@/lib/smtp";
+import type { OutgoingAttachment, SendMailInput } from "@/lib/smtp";
 import { sendMail } from "@/lib/smtp";
+import {
+  approvalTtlHours,
+  cancelPending,
+  getPending,
+  listPending,
+  queueForApproval,
+} from "@/lib/outbox";
+import type { PendingMessageKind, PendingMessageStatus } from "@/lib/outbox-types";
+
+const pendingStatusEnum = z.enum([
+  "pending",
+  "sending",
+  "sent",
+  "failed",
+  "rejected",
+  "cancelled",
+  "expired",
+]);
 import { signAttachmentToken } from "@/lib/auth/attachmentToken";
 import { appBaseUrl } from "@/lib/auth/oauth";
 import {
@@ -85,6 +103,53 @@ function toOutgoing(list: z.infer<typeof attachmentSchema>[] | undefined): Outgo
   }));
 }
 
+/**
+ * Single exit point for every outgoing message. When the account has
+ * human-in-the-loop enabled (or the caller explicitly asked for a review),
+ * the message is parked in the outbox instead of being handed to SMTP; the
+ * caller gets the pending id and the URL where the owner approves it.
+ *
+ * `request_approval` can only ever *add* a review step — an MCP client can
+ * never switch the account's own requirement off.
+ */
+async function dispatchOrQueue(
+  ctx: McpContext,
+  acc: Awaited<ReturnType<typeof requireAccount>>,
+  kind: PendingMessageKind,
+  mail: SendMailInput,
+  opts: { requestApproval?: boolean; replyContext?: { folder: string; uid: number } } = {},
+) {
+  if (!acc.requireSendApproval && !opts.requestApproval) {
+    const result = await sendMail(acc, mail);
+    return jsonResult({ status: "sent", ...result });
+  }
+
+  const pending = await queueForApproval({
+    userId: ctx.userId,
+    account: acc,
+    kind,
+    mail,
+    replyContext: opts.replyContext,
+    requestedByClientId: ctx.clientId ?? null,
+  });
+
+  return jsonResult({
+    status: "pending_approval",
+    message:
+      "Nothing was sent. The message is waiting for the account owner's approval — tell the user to open the approval URL below and approve or reject it. Poll get_pending_message to learn the outcome; never assume the mail went out.",
+    pending_id: pending.id,
+    approval_url: pending.approvalUrl,
+    expires_at: pending.expiresAt,
+    approval_ttl_hours: approvalTtlHours(),
+    account: { id: acc.id, label: acc.label, email: acc.email },
+    to: pending.to,
+    cc: pending.cc,
+    bcc: pending.bcc,
+    subject: pending.subject,
+    attachments: pending.attachments,
+  });
+}
+
 function jsonResult(data: unknown) {
   return {
     content: [
@@ -117,7 +182,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       capabilities: { tools: {} },
       instructions:
-        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.",
+        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.",
     },
   );
 
@@ -264,7 +329,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Send email",
       description:
-        "Send an email through the account's SMTP. Before drafting, call list_accounts and follow the chosen account's `writingStyleInstructions` verbatim — it encodes language, tone, greetings, length and any custom rules the user configured. The HTML signature is appended when include_signature=true. File attachments are accepted as base64. A copy of the sent message is IMAP-appended to the Sent folder for every provider except Gmail (which already saves to Sent through SMTP).",
+        "Send an email through the account's SMTP. Before drafting, call list_accounts and follow the chosen account's `writingStyleInstructions` verbatim — it encodes language, tone, greetings, length and any custom rules the user configured. The HTML signature is appended when include_signature=true. File attachments are accepted as base64. A copy of the sent message is IMAP-appended to the Sent folder for every provider except Gmail (which already saves to Sent through SMTP).\n\nHUMAN-IN-THE-LOOP — when the account has `requireSendApproval` (see list_accounts), NOTHING is sent here: the draft is parked in the owner's outbox and the response comes back with status=\"pending_approval\" plus a `pending_id` and an `approval_url`. Hand that URL to the user, state plainly that the mail has NOT gone out yet, and check get_pending_message for the outcome. Never claim a message was sent unless the response says status=\"sent\".",
       inputSchema: {
         account_id: z.string().uuid(),
         to: z.array(z.string().email()).min(1),
@@ -275,6 +340,12 @@ export function buildMcpServer(ctx: McpContext): McpServer {
         body_html: z.string().optional(),
         include_signature: z.boolean().default(true),
         attachments: z.array(attachmentSchema).optional(),
+        request_approval: z
+          .boolean()
+          .optional()
+          .describe(
+            "Force the human approval step even when the account does not require it. Cannot disable an account's own approval requirement.",
+          ),
       },
     },
     async (args) => {
@@ -283,17 +354,22 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           return errorResult(new Error("body_text or body_html required"));
         }
         const acc = await requireAccount(ctx.userId, args.account_id);
-        const result = await sendMail(acc, {
-          to: args.to,
-          cc: args.cc,
-          bcc: args.bcc,
-          subject: args.subject,
-          text: args.body_text,
-          html: args.body_html,
-          includeSignature: args.include_signature,
-          attachments: toOutgoing(args.attachments),
-        });
-        return jsonResult(result);
+        return await dispatchOrQueue(
+          ctx,
+          acc,
+          "send",
+          {
+            to: args.to,
+            cc: args.cc,
+            bcc: args.bcc,
+            subject: args.subject,
+            text: args.body_text,
+            html: args.body_html,
+            includeSignature: args.include_signature,
+            attachments: toOutgoing(args.attachments),
+          },
+          { requestApproval: args.request_approval },
+        );
       } catch (e) {
         return errorResult(e);
       }
@@ -305,7 +381,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Reply to message",
       description:
-        "Reply to an existing message (preserves In-Reply-To and References, quotes the original when quote_original=true). Follow the account's `writingStyleInstructions` from list_accounts when drafting the body. The reply is IMAP-appended to Sent (skipped on Gmail).",
+        "Reply to an existing message (preserves In-Reply-To and References, quotes the original when quote_original=true). Follow the account's `writingStyleInstructions` from list_accounts when drafting the body. The reply is IMAP-appended to Sent (skipped on Gmail).\n\nHUMAN-IN-THE-LOOP — same approval gate as send_message: when the account has `requireSendApproval`, the reply is only queued (status=\"pending_approval\") and the owner must approve it at `approval_url` before it leaves the server.",
       inputSchema: {
         account_id: z.string().uuid(),
         folder: z.string(),
@@ -316,6 +392,12 @@ export function buildMcpServer(ctx: McpContext): McpServer {
         quote_original: z.boolean().default(true),
         reply_all: z.boolean().default(false),
         attachments: z.array(attachmentSchema).optional(),
+        request_approval: z
+          .boolean()
+          .optional()
+          .describe(
+            "Force the human approval step even when the account does not require it. Cannot disable an account's own approval requirement.",
+          ),
       },
     },
     async (args) => {
@@ -357,18 +439,99 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           }
         }
 
-        const result = await sendMail(acc, {
-          to: to.filter(Boolean) as string[],
-          cc,
-          subject,
-          text: bodyText,
-          html: bodyHtml,
-          includeSignature: args.include_signature,
-          inReplyTo: original.messageId ?? undefined,
-          references: refs.filter(Boolean),
-          attachments: toOutgoing(args.attachments),
+        return await dispatchOrQueue(
+          ctx,
+          acc,
+          "reply",
+          {
+            to: to.filter(Boolean) as string[],
+            cc,
+            subject,
+            text: bodyText,
+            html: bodyHtml,
+            includeSignature: args.include_signature,
+            inReplyTo: original.messageId ?? undefined,
+            references: refs.filter(Boolean),
+            attachments: toOutgoing(args.attachments),
+          },
+          {
+            requestApproval: args.request_approval,
+            replyContext: { folder: args.folder, uid: args.uid },
+          },
+        );
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_pending_messages",
+    {
+      title: "List messages awaiting approval",
+      description:
+        "List the outgoing messages held in the human-in-the-loop outbox, newest first. Use it to check whether a draft you queued has been approved, rejected or has expired. Defaults to the ones still awaiting a decision.",
+      inputSchema: {
+        status: z
+          .array(pendingStatusEnum)
+          .optional()
+          .describe(
+            "Filter by status. Defaults to [\"pending\"]. Possible values: pending, sending, sent, failed, rejected, cancelled, expired.",
+          ),
+        limit: z.number().int().min(1).max(200).default(50),
+      },
+    },
+    async ({ status, limit }) => {
+      try {
+        const statuses: PendingMessageStatus[] = status?.length ? status : ["pending"];
+        const rows = await listPending(ctx.userId, { statuses, limit });
+        return jsonResult({
+          approval_ttl_hours: approvalTtlHours(),
+          count: rows.length,
+          messages: rows,
         });
-        return jsonResult(result);
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_pending_message",
+    {
+      title: "Get an outbox message",
+      description:
+        "Return one queued message with its full body, recipients and current status. This is how you find out what the account owner decided about a draft you submitted — status \"sent\" means it really went out, \"rejected\"/\"cancelled\"/\"expired\" mean it never did, and \"failed\" means it was approved but SMTP refused it (see error_message).",
+      inputSchema: {
+        pending_id: z.string().uuid().describe("The pending_id returned by send_message / reply_message"),
+      },
+    },
+    async ({ pending_id }) => {
+      try {
+        const row = await getPending(ctx.userId, pending_id);
+        if (!row) return errorResult(new Error(`Pending message ${pending_id} not found`));
+        return jsonResult(row);
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "cancel_pending_message",
+    {
+      title: "Withdraw a message awaiting approval",
+      description:
+        "Withdraw a draft you queued before the owner decides on it — for instance when the user changed their mind or you want to submit a corrected version. Only works while the message is still pending; approving is the owner's job and cannot be done from here.",
+      inputSchema: {
+        pending_id: z.string().uuid(),
+        reason: z.string().max(500).optional().describe("Shown to the owner in the outbox history."),
+      },
+    },
+    async ({ pending_id, reason }) => {
+      try {
+        const row = await cancelPending(ctx.userId, pending_id, reason);
+        return jsonResult({ status: "cancelled", message: row });
       } catch (e) {
         return errorResult(e);
       }

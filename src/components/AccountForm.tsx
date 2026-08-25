@@ -22,6 +22,7 @@ export interface AccountFormValues {
   smtpPassword: string;
   signatureHtml: string;
   writingStyle: WritingStyle;
+  requireSendApproval: boolean;
   isDefault: boolean;
 }
 
@@ -41,6 +42,7 @@ const empty: AccountFormValues = {
   smtpPassword: "",
   signatureHtml: "",
   writingStyle: {},
+  requireSendApproval: true,
   isDefault: false,
 };
 
@@ -291,6 +293,28 @@ export function AccountForm({
           />
           Default account
         </label>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 4 }}>Sending approval</h3>
+        <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          Keeps a human in the loop: emails Claude asks to send are held in your
+          approval queue and only reach SMTP once you release them.
+        </p>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={values.requireSendApproval}
+            onChange={(e) => update("requireSendApproval", e.target.checked)}
+          />
+          Require my approval before anything is sent
+        </label>
+        {!values.requireSendApproval && (
+          <div className="alert alert-warning" style={{ marginTop: 12 }}>
+            ⚠️ With approval off, any MCP client holding a token for this server can send
+            email from this account without asking you first.
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
