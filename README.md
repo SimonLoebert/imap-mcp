@@ -118,9 +118,10 @@ App is now available at `http://localhost:3000`.
 
 On every push to `main`, a GitHub Action ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml))
 builds the image and publishes it to `ghcr.io/<owner>/<repo>:latest`. Since `NEXT_PUBLIC_*` values
-are baked in at build time, that published image only has a working Clerk key if the repo defines
-the `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `NEXT_PUBLIC_APP_URL` [repository variables](https://docs.github.com/en/actions/learn-github-actions/variables) —
-otherwise build locally with `docker compose up --build` as above so your own `.env` values are used.
+are baked in at build time, that image falls back to a dummy Clerk key when the repo has no
+`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `NEXT_PUBLIC_APP_URL` [repository variables](https://docs.github.com/en/actions/learn-github-actions/variables)
+set — the build still succeeds, but Clerk auth won't work until you set those variables (or build
+locally with `docker compose up --build` as above so your own `.env` values are used).
 
 ### 3. Add an email account
 
