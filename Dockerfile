@@ -29,9 +29,12 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
-COPY --from=builder /app/node_modules/drizzle-kit ./node_modules/drizzle-kit
-COPY --from=builder /app/node_modules/drizzle-orm ./node_modules/drizzle-orm
 COPY --from=builder /app/package.json ./package.json
+# `.next/standalone` only ships the Next server's own traced node_modules subset — not
+# enough to run `drizzle-kit` (its CLI bin plus its full dependency tree), which
+# `docker compose exec app npx drizzle-kit push` needs for the one-time schema push. Copy
+# the builder's full node_modules (npm ci installed devDependencies too) over it instead.
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
 
 USER nextjs
 EXPOSE 3000
