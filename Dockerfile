@@ -8,12 +8,10 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-# Build-time vars must be public (NEXT_PUBLIC_*). Others are evaluated at runtime.
+# CLERK_PUBLISHABLE_KEY and APP_URL are deliberately NOT set here: the app reads them from
+# process.env at request time (see src/app/layout.tsx, src/middleware.ts, src/lib/auth/oauth.ts),
+# so the same image works across deployments without a rebuild — only .env at runtime matters.
 # We pass a dummy MCP_MASTER_KEY so Next build doesn't fail if code touches it — prefer lazy reads.
-ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-ARG NEXT_PUBLIC_APP_URL
-ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
-ENV NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL}
 ENV DATABASE_URL=postgres://build:build@localhost:5432/build
 ENV MCP_MASTER_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 RUN npm run build

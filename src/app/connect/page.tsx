@@ -5,7 +5,7 @@ import { CopyBlock } from "@/components/CopyButton";
 export const dynamic = "force-dynamic";
 
 export default function ConnectPage() {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+  const baseUrl = process.env.APP_URL || "http://localhost:3000";
   const mcpUrl = `${baseUrl}/api/mcp`;
 
   return (

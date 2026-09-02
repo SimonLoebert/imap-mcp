@@ -102,7 +102,7 @@ Fill in `.env`:
 openssl rand -base64 32
 ```
 
-Paste it as `MCP_MASTER_KEY`. Add your Clerk keys (`pk_test_…` / `sk_test_…`) and set `NEXT_PUBLIC_APP_URL` to the public URL of your deployment (e.g. `https://mcp.example.com` or `http://localhost:3000` for local).
+Paste it as `MCP_MASTER_KEY`. Add your Clerk keys (`CLERK_PUBLISHABLE_KEY` / `CLERK_SECRET_KEY`) and set `APP_URL` to the public URL of your deployment (e.g. `https://mcp.example.com` or `http://localhost:3000` for local).
 
 ⚠️ **Losing `MCP_MASTER_KEY` means losing every stored IMAP/SMTP password.** Back it up.
 
@@ -117,11 +117,10 @@ docker compose exec app npx drizzle-kit push
 App is now available at `http://localhost:3000`.
 
 On every push to `main`, a GitHub Action ([`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml))
-builds the image and publishes it to `ghcr.io/<owner>/<repo>:latest`. Since `NEXT_PUBLIC_*` values
-are baked in at build time, that image falls back to a dummy Clerk key when the repo has no
-`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `NEXT_PUBLIC_APP_URL` [repository variables](https://docs.github.com/en/actions/learn-github-actions/variables)
-set — the build still succeeds, but Clerk auth won't work until you set those variables (or build
-locally with `docker compose up --build` as above so your own `.env` values are used).
+builds the image and publishes it to `ghcr.io/<owner>/<repo>:latest`. `CLERK_PUBLISHABLE_KEY` and
+`APP_URL` are read from `process.env` at request time, not baked into the image at build time, so
+this prebuilt image works out of the box on any host — just point `env_file: .env` at a `.env` with
+your real values and (re)start the container. No local build or GitHub repository variables needed.
 
 ### 3. Add an email account
 
@@ -221,9 +220,17 @@ hint when the test fails. Use one of:
 ### First Docker build fails on `DATABASE_URL is not set`
 
 The builder needs a placeholder at build-time; this repo's `Dockerfile` already sets a
-dummy `DATABASE_URL` and `MCP_MASTER_KEY` for the build stage, and receives
-`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `NEXT_PUBLIC_APP_URL` as build args from
-`docker-compose.yml`. Make sure your `.env` defines them before `docker compose up --build`.
+dummy `DATABASE_URL` and `MCP_MASTER_KEY` for the build stage. `CLERK_PUBLISHABLE_KEY` and
+`APP_URL` are not needed at build time at all — they're read from `.env` at container
+startup, so the same image works unmodified across deployments.
+
+### Clerk error "Invalid host" / instance shows `dummy.clerk.accounts.dev`
+
+This happened when `CLERK_PUBLISHABLE_KEY` (formerly `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`)
+was baked into the Docker image at build time and the build had no real key available —
+common when pulling the prebuilt `ghcr.io` image built by CI. As of this fix the key and
+`APP_URL` are read from `.env` at runtime, so just set them there and restart the
+container (`docker compose up -d`) — no rebuild required.
 
 ### Applying the schema inside Docker
 

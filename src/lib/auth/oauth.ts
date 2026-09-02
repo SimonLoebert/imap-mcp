@@ -18,8 +18,8 @@ function refreshTokenTtl(): number {
 }
 
 export function appBaseUrl(): string {
-  const v = process.env.NEXT_PUBLIC_APP_URL;
-  if (!v) throw new Error("NEXT_PUBLIC_APP_URL is required");
+  const v = process.env.APP_URL;
+  if (!v) throw new Error("APP_URL is required");
   return v.replace(/\/$/, "");
 }
 

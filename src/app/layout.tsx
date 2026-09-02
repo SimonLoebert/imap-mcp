@@ -7,9 +7,11 @@ export const metadata: Metadata = {
   description: "Self-hosted remote MCP server for multi-account IMAP/SMTP",
 };
 
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <ClerkProvider>
+    <ClerkProvider publishableKey={process.env.CLERK_PUBLISHABLE_KEY}>
       <html lang="en">
         <body>{children}</body>
       </html>
