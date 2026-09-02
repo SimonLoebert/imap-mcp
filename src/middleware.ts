@@ -21,13 +21,16 @@ const isPublicApi = createRouteMatcher([
   "/.well-known/(.*)",
 ]);
 
-export default clerkMiddleware(async (auth, req) => {
-  if (isPublicApi(req)) return NextResponse.next();
-  if (isProtectedRoute(req)) {
-    await auth.protect();
-  }
-  return NextResponse.next();
-});
+export default clerkMiddleware(
+  async (auth, req) => {
+    if (isPublicApi(req)) return NextResponse.next();
+    if (isProtectedRoute(req)) {
+      await auth.protect();
+    }
+    return NextResponse.next();
+  },
+  { publishableKey: process.env.CLERK_PUBLISHABLE_KEY },
+);
 
 export const config = {
   matcher: [
