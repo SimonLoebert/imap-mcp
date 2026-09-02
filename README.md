@@ -235,11 +235,12 @@ container (`docker compose up -d`) — no rebuild required.
 ### Applying the schema inside Docker
 
 ```bash
-docker compose exec app node node_modules/drizzle-kit/bin.cjs push
+docker compose exec app npx drizzle-kit push
 ```
 
-(The `drizzle-kit push` command needs `esbuild` at runtime to load the TS config. If
-missing, install it in the container: `docker compose exec app npm i esbuild --no-save`.)
+If this fails with `relation "users" does not exist` (or any other table) when loading a
+page, the schema was never pushed — run the command above once against your `DATABASE_URL`
+and reload.
 
 ## MCP tools
 
