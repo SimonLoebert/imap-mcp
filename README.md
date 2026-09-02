@@ -1,3 +1,5 @@
+> fork from cldt-fr/imap-mcp with HITL support
+
 # imap-mcp
 
 > Self-hosted remote **MCP server** that lets an AI (Claude, etc.) read, search and send email through **multiple IMAP/SMTP accounts**, and read/write the user's calendar through **CalDAV** — authenticated via **Clerk**.
