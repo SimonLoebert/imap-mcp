@@ -300,6 +300,21 @@ textarea {
   align-items: center;
 }
 
+@media (max-width: 640px) {
+  .container {
+    padding: 20px 16px;
+  }
+  .topnav {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+  .topnav-links {
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
