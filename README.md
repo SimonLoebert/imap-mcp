@@ -110,9 +110,11 @@ Paste it as `MCP_MASTER_KEY`. Add your Clerk keys (`CLERK_PUBLISHABLE_KEY` / `CL
 
 ```bash
 docker compose up --build
-# In another terminal, apply the schema on first install:
-docker compose exec app npx drizzle-kit push
 ```
+
+The container applies `src/lib/db/schema.ts` to `DATABASE_URL` (`drizzle-kit push --force`)
+on every start, before the server begins listening — no manual schema step needed, on first
+install or after a schema change in a newer image.
 
 App is now available at `http://localhost:3000`.
 
@@ -234,13 +236,21 @@ container (`docker compose up -d`) — no rebuild required.
 
 ### Applying the schema inside Docker
 
+The container's entrypoint (`docker-entrypoint.sh`) already runs `drizzle-kit push --force`
+against `DATABASE_URL` before starting the server, so this normally isn't something you do
+by hand. If a page still fails with `relation "users" does not exist` (or any other table),
+check `docker compose logs app` for the push step's output — most likely `DATABASE_URL` is
+wrong or unreachable at container start. You can also run it manually to see the error live:
+
 ```bash
-docker compose exec app npx drizzle-kit push
+docker compose exec app npx drizzle-kit push --force
 ```
 
-If this fails with `relation "users" does not exist` (or any other table) when loading a
-page, the schema was never pushed — run the command above once against your `DATABASE_URL`
-and reload.
+⚠️ `--force` applies drizzle-kit's own best guess for ambiguous changes (e.g. a column
+rename it can't distinguish from a drop-and-add) without asking — same tradeoff as the
+automatic push on every start. Keep schema changes additive (new columns get a `.default()`,
+per the rule above) and this stays safe; for a genuinely ambiguous change, push once by hand
+without `--force` first to see what it plans.
 
 ## MCP tools
 
