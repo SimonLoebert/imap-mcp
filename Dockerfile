@@ -31,13 +31,15 @@ COPY --from=builder /app/src ./src
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/package.json ./package.json
 # `.next/standalone` only ships the Next server's own traced node_modules subset — not
-# enough to run `drizzle-kit` (its CLI bin plus its full dependency tree), which
-# `docker compose exec app npx drizzle-kit push` needs for the one-time schema push. Copy
-# the builder's full node_modules (npm ci installed devDependencies too) over it instead.
+# enough to run `drizzle-kit` (its CLI bin plus its full dependency tree), which the
+# entrypoint below needs to push the schema on every start. Copy the builder's full
+# node_modules (npm ci installed devDependencies too) over it instead.
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --chown=nextjs:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 
 USER nextjs
 EXPOSE 3000
 ENV PORT=3000 HOSTNAME=0.0.0.0
 
-CMD ["node", "server.js"]
+CMD ["./docker-entrypoint.sh"]
