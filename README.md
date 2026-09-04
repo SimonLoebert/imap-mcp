@@ -149,10 +149,18 @@ approval queue and the MCP client gets back `status: "pending_approval"` with an
 
 1. Open **`/outbox`** (the header link shows a badge with the number of messages waiting).
 2. Review sender, recipients, subject, body (HTML and plain text) and attachments.
-3. **Approve & send** hands the message to SMTP right there, **Reject** discards it. An
+3. **Add files of your own** with *＋ Add files*, or drop one Claude attached with the ✕ on
+   its chip. Both only work while the message is still pending, and the message is sent
+   with exactly the files listed at the moment you approve it. Images embedded in the HTML
+   body cannot be removed on their own — they are referenced by Content-ID.
+4. **Approve & send** hands the message to SMTP right there, **Reject** discards it. An
    optional note is stored in the history and is visible to the MCP client.
-4. Undecided messages expire after `OUTBOX_APPROVAL_TTL_HOURS` (72 by default) and can
+5. Undecided messages expire after `OUTBOX_APPROVAL_TTL_HOURS` (72 by default) and can
    never be sent afterwards.
+
+Attaching is a human-only action: it lives behind Clerk on `/api/outbox/[id]/attachments`,
+so an MCP client can never slip a file onto a draft you are reviewing. A queued message
+may carry at most 25 attachments totalling 25 MB.
 
 Turn the requirement off per account in the account form if you want a specific mailbox to
 send without asking — the warning shown there is worth reading first.
@@ -367,6 +375,12 @@ oauth_tokens(id, access_token_hash UNIQUE, refresh_token_hash,
              client_id, user_id, access_expires_at, refresh_expires_at, revoked_at)
 ```
 
+`pending_messages.payload` is the verbatim SMTP input. Each entry of its `attachments`
+array carries `addedBy` (`"client"` = queued by the MCP client, `"user"` = attached by the
+owner during review) and, for reviewer uploads, an `addedAt` timestamp. Both are
+bookkeeping for the approval UI and are stripped before the MIME is composed. Rows written
+before this feature have no `addedBy` and are read as `"client"` — no migration needed.
+
 ## Security notes
 
 - Master key: AES-256-GCM, IV per ciphertext, authenticated. Ciphertext = `base64(iv(12) ‖ ct ‖ tag(16))`.
@@ -378,6 +392,7 @@ oauth_tokens(id, access_token_hash UNIQUE, refresh_token_hash,
 - The `/api/mcp` endpoint always returns `WWW-Authenticate: Bearer resource_metadata="…"` on 401, per RFC 9728.
 - Approval is enforced server-side in the single code path every outgoing message goes through. An MCP client can *request* a review (`request_approval: true`) but has no way to switch off an account's own requirement, and approving is only possible from the Clerk-authenticated web UI — never through MCP.
 - The pending → sending transition is a guarded `UPDATE … WHERE status = 'pending'`, so a double click or two open tabs can never hand the same message to SMTP twice.
+- Editing a pending message's attachments is guarded the same way: the row is locked `FOR UPDATE` for the read-modify-write, and the `status = 'pending'` condition means nothing can be bolted onto a message already on its way to SMTP. Uploaded filenames are stripped of path separators, quotes and control characters before they reach `Content-Disposition`.
 - Queued HTML bodies are DOMPurify-sanitized before they are rendered in the approval preview.
 
 ## Out of scope (v1)
