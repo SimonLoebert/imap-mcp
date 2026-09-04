@@ -40,6 +40,10 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function totalAttachmentBytes(message: PendingMessageSummary): number {
+  return message.attachments.reduce((sum, a) => sum + a.sizeBytes, 0);
+}
+
 function relativeDeadline(iso: string): string {
   const ms = new Date(iso).getTime() - Date.now();
   if (ms <= 0) return "expired";
@@ -174,6 +178,54 @@ export function OutboxList({ messages }: { messages: PendingMessageSummary[] }) 
     }
   }
 
+  /** Upload files the reviewer picked onto a message that is still pending. */
+  async function attach(id: string, files: File[]) {
+    if (files.length === 0) return;
+    setBusy({ id, action: "attach" });
+    setError(null);
+    try {
+      const form = new FormData();
+      for (const file of files) form.append("files", file);
+      const res = await fetch(`/api/outbox/${id}/attachments`, {
+        method: "POST",
+        body: form,
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof body.error === "string" ? body.error : `HTTP ${res.status}`,
+        );
+      }
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function detach(id: string, index: number, filename: string) {
+    if (!confirm(`Remove "${filename}" from this message?`)) return;
+    setBusy({ id, action: "detach" });
+    setError(null);
+    try {
+      const res = await fetch(`/api/outbox/${id}/attachments?index=${index}`, {
+        method: "DELETE",
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof body.error === "string" ? body.error : `HTTP ${res.status}`,
+        );
+      }
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function Card({ message }: { message: PendingMessageSummary }) {
     const isPending = message.status === "pending";
     const running = busy?.id === message.id;
@@ -202,19 +254,64 @@ export function OutboxList({ messages }: { messages: PendingMessageSummary[] }) 
         <div className="divider" />
         <MessageBody message={message} />
 
-        {message.attachments.length > 0 && (
-          <div style={{ marginTop: 12 }}>
-            <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>
-              {message.attachments.length} attachment
-              {message.attachments.length === 1 ? "" : "s"}
+        {(message.attachments.length > 0 || isPending) && (
+          <div className="stack stack-sm" style={{ marginTop: 12 }}>
+            <div className="muted" style={{ fontSize: 13 }}>
+              {message.attachments.length === 0
+                ? "No attachments"
+                : `${message.attachments.length} attachment${
+                    message.attachments.length === 1 ? "" : "s"
+                  } · ${formatBytes(totalAttachmentBytes(message))}`}
             </div>
-            <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-              {message.attachments.map((a, i) => (
-                <span key={`${a.filename}-${i}`} className="badge badge-muted">
-                  📎 {a.filename} · {formatBytes(a.sizeBytes)}
+            {message.attachments.length > 0 && (
+              <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                {message.attachments.map((a) => (
+                  <span key={a.index} className="attachment-chip">
+                    <span className="attachment-name" title={a.filename}>
+                      📎 {a.filename}
+                    </span>
+                    <span className="muted">{formatBytes(a.sizeBytes)}</span>
+                    {a.addedBy === "user" && (
+                      <span className="badge badge-soft">added by you</span>
+                    )}
+                    {isPending && a.removable && (
+                      <button
+                        type="button"
+                        className="attachment-remove"
+                        disabled={running}
+                        aria-label={`Remove ${a.filename}`}
+                        title={`Remove ${a.filename}`}
+                        onClick={() => detach(message.id, a.index, a.filename)}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+            {isPending && (
+              <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <label className={running ? "btn btn-sm btn-file is-disabled" : "btn btn-sm btn-file"}>
+                  {running && busy?.action === "attach" ? "Uploading…" : "＋ Add files"}
+                  <input
+                    type="file"
+                    multiple
+                    className="visually-hidden"
+                    disabled={running}
+                    onChange={(e) => {
+                      const picked = Array.from(e.target.files ?? []);
+                      // Reset so picking the same file twice fires onChange again.
+                      e.target.value = "";
+                      void attach(message.id, picked);
+                    }}
+                  />
+                </label>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  Files you add here are sent along with the message.
                 </span>
-              ))}
-            </div>
+              </div>
+            )}
           </div>
         )}
 

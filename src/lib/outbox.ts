@@ -5,6 +5,7 @@ import { mailAccounts, pendingMessages, type MailAccount } from "@/lib/db/schema
 import { sendMail, type SendMailInput, type SendMailResult } from "@/lib/smtp";
 import { appBaseUrl } from "@/lib/auth/oauth";
 import type {
+  PendingAttachment,
   PendingAttachmentSummary,
   PendingMessageKind,
   PendingMessagePayload,
@@ -16,6 +17,17 @@ const DEFAULT_TTL_HOURS = 72;
 const MAX_TTL_HOURS = 24 * 30;
 /** Guard against a single queued message bloating the row beyond what jsonb comfortably holds. */
 const MAX_PAYLOAD_BYTES = 25 * 1024 * 1024;
+/** Keep the MIME part count sane — the same ceiling applies to reviewer uploads. */
+const MAX_ATTACHMENT_COUNT = 25;
+
+/** Total decoded attachment bytes a single queued message may carry. */
+export function maxAttachmentBytes(): number {
+  return MAX_PAYLOAD_BYTES;
+}
+
+export function maxAttachmentCount(): number {
+  return MAX_ATTACHMENT_COUNT;
+}
 
 export function approvalTtlHours(): number {
   const raw = Number(process.env.OUTBOX_APPROVAL_TTL_HOURS);
@@ -41,12 +53,28 @@ function base64Bytes(b64: string): number {
 }
 
 function attachmentSummaries(payload: PendingMessagePayload): PendingAttachmentSummary[] {
-  return (payload.attachments ?? []).map((a) => ({
+  return (payload.attachments ?? []).map((a, index) => ({
+    index,
     filename: a.filename,
     contentType: a.contentType,
     sizeBytes: base64Bytes(a.contentBase64),
     isInline: a.isInline ?? false,
+    addedBy: a.addedBy ?? "client",
+    // Inline parts are referenced from the HTML body by Content-ID; removing
+    // one would leave a dangling cid: reference in the sent mail.
+    removable: !(a.isInline ?? false),
   }));
+}
+
+/**
+ * Strip anything that could turn a user-supplied name into a path or a header
+ * injection once nodemailer writes it into Content-Disposition.
+ */
+export function sanitizeAttachmentFilename(raw: string): string {
+  const base = raw.split(/[\\/]/).pop() ?? "";
+  // eslint-disable-next-line no-control-regex
+  const cleaned = base.replace(/[\u0000-\u001f\u007f"]/g, "").trim();
+  return (cleaned || "attachment").slice(0, 255);
 }
 
 type Row = typeof pendingMessages.$inferSelect;
@@ -126,11 +154,12 @@ export async function queueForApproval(input: QueueInput): Promise<PendingMessag
     references: input.mail.references,
     includeSignature: input.mail.includeSignature,
     attachments: input.mail.attachments?.map((a) => ({
-      filename: a.filename,
+      filename: sanitizeAttachmentFilename(a.filename),
       contentBase64: a.contentBase64,
       contentType: a.contentType,
       contentId: a.contentId,
       isInline: a.isInline,
+      addedBy: "client" as const,
     })),
   };
 
@@ -403,4 +432,144 @@ export async function deletePending(userId: string, id: string): Promise<boolean
     .where(and(eq(pendingMessages.id, id), eq(pendingMessages.userId, userId)))
     .returning({ id: pendingMessages.id });
   return rows.length > 0;
+}
+
+/** A file the reviewer picked in the approval UI, already read into memory. */
+export interface ReviewerAttachmentInput {
+  filename: string;
+  contentBase64: string;
+  contentType?: string;
+}
+
+/**
+ * Attach files to a message that is still waiting for a decision.
+ *
+ * The row is locked for the read-modify-write so two uploads from two tabs
+ * can't clobber each other's payload, and the `status = 'pending'` guard makes
+ * sure nothing is bolted onto a message that is already on its way to SMTP.
+ */
+export async function addAttachments(
+  userId: string,
+  id: string,
+  files: ReviewerAttachmentInput[],
+): Promise<PendingMessageSummary> {
+  if (files.length === 0) throw new Error("No files given");
+  await expireStale(userId);
+
+  const row = await db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select()
+      .from(pendingMessages)
+      .where(and(eq(pendingMessages.id, id), eq(pendingMessages.userId, userId)))
+      .limit(1)
+      .for("update");
+    if (!locked) throw new OutboxStateError(`Message ${id} not found`, null);
+    if (locked.status !== "pending") {
+      throw new OutboxStateError(
+        `Message ${id} is no longer pending (status: ${locked.status}) — attachments can only be added while it awaits a decision`,
+        locked.status,
+      );
+    }
+
+    const existing = locked.payload.attachments ?? [];
+    const added: PendingAttachment[] = files.map((f) => ({
+      filename: sanitizeAttachmentFilename(f.filename),
+      contentBase64: f.contentBase64,
+      contentType: f.contentType || "application/octet-stream",
+      addedBy: "user",
+      addedAt: new Date().toISOString(),
+    }));
+    const attachments = [...existing, ...added];
+
+    if (attachments.length > MAX_ATTACHMENT_COUNT) {
+      throw new OutboxStateError(
+        `That would leave ${attachments.length} attachments on the message, over the limit of ${MAX_ATTACHMENT_COUNT}`,
+        locked.status,
+      );
+    }
+    const totalBytes = attachments.reduce((sum, a) => sum + base64Bytes(a.contentBase64), 0);
+    if (totalBytes > MAX_PAYLOAD_BYTES) {
+      throw new OutboxStateError(
+        `Attachments would total ${(totalBytes / 1024 / 1024).toFixed(1)} MB, over the ${Math.round(
+          MAX_PAYLOAD_BYTES / 1024 / 1024,
+        )} MB limit for a message awaiting approval`,
+        locked.status,
+      );
+    }
+
+    const [updated] = await tx
+      .update(pendingMessages)
+      .set({ payload: { ...locked.payload, attachments } })
+      .where(and(eq(pendingMessages.id, id), eq(pendingMessages.status, "pending")))
+      .returning();
+    if (!updated) throw await notPendingError(userId, id);
+    return updated;
+  });
+
+  return withAccount(row);
+}
+
+/**
+ * Drop one attachment from a message that is still pending. Inline parts are
+ * refused: the HTML body references them by Content-ID.
+ */
+export async function removeAttachment(
+  userId: string,
+  id: string,
+  index: number,
+): Promise<PendingMessageSummary> {
+  await expireStale(userId);
+
+  const row = await db.transaction(async (tx) => {
+    const [locked] = await tx
+      .select()
+      .from(pendingMessages)
+      .where(and(eq(pendingMessages.id, id), eq(pendingMessages.userId, userId)))
+      .limit(1)
+      .for("update");
+    if (!locked) throw new OutboxStateError(`Message ${id} not found`, null);
+    if (locked.status !== "pending") {
+      throw new OutboxStateError(
+        `Message ${id} is no longer pending (status: ${locked.status}) — attachments can only be removed while it awaits a decision`,
+        locked.status,
+      );
+    }
+
+    const existing = locked.payload.attachments ?? [];
+    const target = existing[index];
+    if (!target) {
+      throw new OutboxStateError(`Message ${id} has no attachment at index ${index}`, locked.status);
+    }
+    if (target.isInline) {
+      throw new OutboxStateError(
+        `"${target.filename}" is embedded in the message body and cannot be removed on its own`,
+        locked.status,
+      );
+    }
+
+    const attachments = existing.filter((_, i) => i !== index);
+    const [updated] = await tx
+      .update(pendingMessages)
+      .set({
+        payload: {
+          ...locked.payload,
+          attachments: attachments.length ? attachments : undefined,
+        },
+      })
+      .where(and(eq(pendingMessages.id, id), eq(pendingMessages.status, "pending")))
+      .returning();
+    if (!updated) throw await notPendingError(userId, id);
+    return updated;
+  });
+
+  return withAccount(row);
+}
+
+async function withAccount(row: Row): Promise<PendingMessageSummary> {
+  const [account] = await db
+    .select({ label: mailAccounts.label, email: mailAccounts.email })
+    .from(mailAccounts)
+    .where(eq(mailAccounts.id, row.accountId))
+    .limit(1);
+  return summarize(row, account ?? { label: "(deleted account)", email: "" });
 }

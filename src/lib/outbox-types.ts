@@ -32,12 +32,19 @@ export const PENDING_STATUSES: readonly PendingMessageStatus[] = [
   "expired",
 ] as const;
 
+/** Who put the file on the message. Legacy rows have no marker — treat them as "client". */
+export type AttachmentOrigin = "client" | "user";
+
 export interface PendingAttachment {
   filename: string;
   contentBase64: string;
   contentType?: string;
   contentId?: string;
   isInline?: boolean;
+  /** Absent on rows written before the reviewer could attach files. */
+  addedBy?: AttachmentOrigin;
+  /** ISO timestamp of a reviewer upload; absent for client-supplied files. */
+  addedAt?: string;
 }
 
 /** Everything needed to send the message verbatim once it is approved. */
@@ -56,10 +63,18 @@ export interface PendingMessagePayload {
 
 /** Attachment metadata without the base64 blob. */
 export interface PendingAttachmentSummary {
+  /** Position in the payload's attachment array — the handle for removal. */
+  index: number;
   filename: string;
   contentType?: string;
   sizeBytes: number;
   isInline: boolean;
+  addedBy: AttachmentOrigin;
+  /**
+   * False for inline files: the HTML body references them by Content-ID, so
+   * dropping one would leave a broken image behind.
+   */
+  removable: boolean;
 }
 
 /**
