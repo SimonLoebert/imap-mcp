@@ -54,6 +54,12 @@ export const mailAccounts = pgTable(
      * once the account owner approves them in the web UI.
      */
     requireSendApproval: boolean("require_send_approval").notNull().default(true),
+    /**
+     * Recipients that skip the approval gate: full addresses or `@domain`
+     * entries (see src/lib/allowlist.ts). Only honoured when every recipient
+     * of a message is covered.
+     */
+    approvalAllowlist: text("approval_allowlist").array().notNull().default([]),
     isDefault: boolean("is_default").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

@@ -23,6 +23,7 @@ export interface AccountFormValues {
   signatureHtml: string;
   writingStyle: WritingStyle;
   requireSendApproval: boolean;
+  approvalAllowlist: string[];
   isDefault: boolean;
 }
 
@@ -43,6 +44,7 @@ const empty: AccountFormValues = {
   signatureHtml: "",
   writingStyle: {},
   requireSendApproval: true,
+  approvalAllowlist: [],
   isDefault: false,
 };
 
@@ -144,6 +146,9 @@ export function AccountForm({
 }) {
   const router = useRouter();
   const [values, setValues] = useState<AccountFormValues>({ ...empty, ...initial });
+  const [allowlistText, setAllowlistText] = useState(
+    (initial?.approvalAllowlist ?? []).join("\n"),
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<null | {
@@ -180,7 +185,13 @@ export function AccountForm({
     try {
       const url = mode === "create" ? "/api/accounts" : `/api/accounts/${accountId}`;
       const method = mode === "create" ? "POST" : "PATCH";
-      const payload: Partial<AccountFormValues> = { ...values };
+      const payload: Partial<AccountFormValues> = {
+        ...values,
+        approvalAllowlist: allowlistText
+          .split(/[\s,;]+/)
+          .map((x) => x.trim())
+          .filter(Boolean),
+      };
       if (mode === "edit" && !values.imapPassword) delete payload.imapPassword;
       if (mode === "edit" && !values.smtpPassword) delete payload.smtpPassword;
       const res = await fetch(url, {
@@ -313,6 +324,30 @@ export function AccountForm({
           <div className="alert alert-warning" style={{ marginTop: 12 }}>
             ⚠️ With approval off, any MCP client holding a token for this server can send
             email from this account without asking you first.
+          </div>
+        )}
+        {values.requireSendApproval && (
+          <div className="field" style={{ marginTop: 16, marginBottom: 0 }}>
+            <label>
+              Recipients that skip approval{" "}
+              <span className="hint">
+                (one per line — a full address like jane@example.com or a whole domain like
+                @example.com)
+              </span>
+            </label>
+            <textarea
+              className="textarea"
+              rows={4}
+              value={allowlistText}
+              onChange={(e) => setAllowlistText(e.target.value)}
+              placeholder={"jane@example.com\n@my-company.com"}
+              spellCheck={false}
+            />
+            <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+              A message goes out without approval only if <strong>every</strong> recipient
+              (To, Cc and Bcc) is on this list. Domains match exactly — @example.com does not
+              cover sub.example.com.
+            </p>
           </div>
         )}
       </div>

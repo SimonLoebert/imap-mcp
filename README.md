@@ -162,6 +162,15 @@ Attaching is a human-only action: it lives behind Clerk on `/api/outbox/[id]/att
 so an MCP client can never slip a file onto a draft you are reviewing. A queued message
 may carry at most 25 attachments totalling 25 MB.
 
+**Recipients that skip approval.** In the same card you can list addresses
+(`jane@example.com`) or whole domains (`@example.com`, or just `example.com`) that
+Claude may mail without asking. A message only bypasses the queue when **every** To, Cc
+and Bcc recipient is on that account's list — one outsider and the whole message waits for
+you. Domains match exactly (`@example.com` does not cover `sub.example.com`), and a client
+passing `request_approval: true` is still queued. The MCP client sees the list in
+`list_accounts` and gets `status: "sent"` with `approval_skipped: "recipient_allowlist"`
+back; it cannot change the list.
+
 Turn the requirement off per account in the account form if you want a specific mailbox to
 send without asking — the warning shown there is worth reading first.
 
@@ -359,7 +368,7 @@ mail_accounts(id, user_id, label, email,
               imap_{host,port,secure,user,password_enc},
               smtp_{host,port,secure,user,password_enc},
               signature_html, writing_style,
-              require_send_approval, is_default)
+              require_send_approval, approval_allowlist[], is_default)
 pending_messages(id, user_id, account_id, kind, status,
                  subject, to_addresses[], cc_addresses[], bcc_addresses[],
                  payload, reply_folder, reply_uid, requested_by_client_id,
@@ -390,7 +399,7 @@ before this feature have no `addedBy` and are read as `"client"` — no migratio
 - Signatures pass through DOMPurify server-side before storage *and* before being injected into outgoing mail.
 - Attachment download URLs are HMAC-SHA256-signed (separate key derived from `MCP_MASTER_KEY`) and expire in 15 minutes. They encode `{userId, accountId, folder, uid, index, exp}` — tampering is rejected in constant time, expired tokens are refused. Files are never written to disk on the MCP server; each request streams directly from IMAP and is garbage-collected after the response.
 - The `/api/mcp` endpoint always returns `WWW-Authenticate: Bearer resource_metadata="…"` on 401, per RFC 9728.
-- Approval is enforced server-side in the single code path every outgoing message goes through. An MCP client can *request* a review (`request_approval: true`) but has no way to switch off an account's own requirement, and approving is only possible from the Clerk-authenticated web UI — never through MCP.
+- Approval is enforced server-side in the single code path every outgoing message goes through. The recipient allowlist is checked there too, against the addresses exactly as nodemailer will parse them, so a field such as `"a@ok.com, b@elsewhere.com"` cannot smuggle an extra recipient past it. An MCP client can *request* a review (`request_approval: true`) but has no way to switch off an account's own requirement, and approving is only possible from the Clerk-authenticated web UI — never through MCP.
 - The pending → sending transition is a guarded `UPDATE … WHERE status = 'pending'`, so a double click or two open tabs can never hand the same message to SMTP twice.
 - Editing a pending message's attachments is guarded the same way: the row is locked `FOR UPDATE` for the read-modify-write, and the `status = 'pending'` condition means nothing can be bolted onto a message already on its way to SMTP. Uploaded filenames are stripped of path separators, quotes and control characters before they reach `Content-Disposition`.
 - Queued HTML bodies are DOMPurify-sanitized before they are rendered in the approval preview.
