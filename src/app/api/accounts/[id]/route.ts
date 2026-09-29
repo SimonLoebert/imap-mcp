@@ -73,6 +73,7 @@ export async function PATCH(
   if (input.requireSendApproval !== undefined) {
     patch.requireSendApproval = input.requireSendApproval;
   }
+  if (input.approvalAllowlist !== undefined) patch.approvalAllowlist = input.approvalAllowlist;
   if (input.isDefault !== undefined) patch.isDefault = input.isDefault;
 
   await db

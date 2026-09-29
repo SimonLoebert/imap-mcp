@@ -50,6 +50,7 @@ export default async function EditAccountPage({
           signatureHtml: acc.signatureHtml ?? "",
           writingStyle: acc.writingStyle ?? {},
           requireSendApproval: acc.requireSendApproval,
+          approvalAllowlist: acc.approvalAllowlist,
           isDefault: acc.isDefault,
         }}
       />

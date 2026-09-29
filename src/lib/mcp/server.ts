@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { McpContext } from "./context";
+import { recipientsAllowlisted } from "@/lib/allowlist";
 import {
   listUserAccounts,
   listUserCalendarAccounts,
@@ -119,9 +120,17 @@ async function dispatchOrQueue(
   mail: SendMailInput,
   opts: { requestApproval?: boolean; replyContext?: { folder: string; uid: number } } = {},
 ) {
-  if (!acc.requireSendApproval && !opts.requestApproval) {
-    const result = await sendMail(acc, mail);
-    return jsonResult({ status: "sent", ...result });
+  if (!opts.requestApproval) {
+    if (!acc.requireSendApproval) {
+      const result = await sendMail(acc, mail);
+      return jsonResult({ status: "sent", ...result });
+    }
+    // The owner pre-approved these recipients: every To/Cc/Bcc address has to
+    // be on the account's allowlist, a single outsider keeps the gate closed.
+    if (recipientsAllowlisted(acc.approvalAllowlist, mail)) {
+      const result = await sendMail(acc, mail);
+      return jsonResult({ status: "sent", approval_skipped: "recipient_allowlist", ...result });
+    }
   }
 
   const pending = await queueForApproval({
@@ -182,7 +191,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       capabilities: { tools: {} },
       instructions:
-        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.",
+        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. Exception: when EVERY recipient (To, Cc and Bcc) is on the account's `approvalAllowlist` (full addresses or `@domain` entries, exact domain match only), the message is sent immediately and the response says status=\"sent\". One recipient outside the list sends the whole message to approval. Always read `status` in the response instead of predicting it. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.",
     },
   );
 
@@ -190,7 +199,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     "list_accounts",
     {
       title: "List email accounts",
-      description: "List the IMAP/SMTP email accounts configured by the current user.",
+      description:
+        "List the IMAP/SMTP email accounts configured by the current user. `requireSendApproval` says whether sends are held for the owner's approval; `approvalAllowlist` lists the addresses and `@domain`s that skip that approval — only when every recipient of a message is on it. Only the owner can change either, in the web UI.",
       inputSchema: {},
     },
     async () => {
@@ -329,7 +339,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Send email",
       description:
-        "Send an email through the account's SMTP. Before drafting, call list_accounts and follow the chosen account's `writingStyleInstructions` verbatim — it encodes language, tone, greetings, length and any custom rules the user configured. The HTML signature is appended when include_signature=true. File attachments are accepted as base64. A copy of the sent message is IMAP-appended to the Sent folder for every provider except Gmail (which already saves to Sent through SMTP).\n\nHUMAN-IN-THE-LOOP — when the account has `requireSendApproval` (see list_accounts), NOTHING is sent here: the draft is parked in the owner's outbox and the response comes back with status=\"pending_approval\" plus a `pending_id` and an `approval_url`. Hand that URL to the user, state plainly that the mail has NOT gone out yet, and check get_pending_message for the outcome. The owner can also attach further files to the draft on that page before approving it, so don't ask the user to re-queue a message just to add an attachment. Never claim a message was sent unless the response says status=\"sent\".",
+        "Send an email through the account's SMTP. Before drafting, call list_accounts and follow the chosen account's `writingStyleInstructions` verbatim — it encodes language, tone, greetings, length and any custom rules the user configured. The HTML signature is appended when include_signature=true. File attachments are accepted as base64. A copy of the sent message is IMAP-appended to the Sent folder for every provider except Gmail (which already saves to Sent through SMTP).\n\nHUMAN-IN-THE-LOOP — when the account has `requireSendApproval` (see list_accounts), NOTHING is sent here: the draft is parked in the owner's outbox and the response comes back with status=\"pending_approval\" plus a `pending_id` and an `approval_url`. Hand that URL to the user, state plainly that the mail has NOT gone out yet, and check get_pending_message for the outcome. The owner can also attach further files to the draft on that page before approving it, so don't ask the user to re-queue a message just to add an attachment. Exception: if every To/Cc/Bcc recipient is covered by the account's `approvalAllowlist` (see list_accounts), the message is sent immediately with status=\"sent\"; a single recipient outside it queues the whole message. `request_approval: true` always queues. Never claim a message was sent unless the response says status=\"sent\".",
       inputSchema: {
         account_id: z.string().uuid(),
         to: z.array(z.string().email()).min(1),
@@ -344,7 +354,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           .boolean()
           .optional()
           .describe(
-            "Force the human approval step even when the account does not require it. Cannot disable an account's own approval requirement.",
+            "Force the human approval step even when the account does not require it or all recipients are allowlisted. Cannot disable an account's own approval requirement.",
           ),
       },
     },
@@ -381,7 +391,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Reply to message",
       description:
-        "Reply to an existing message (preserves In-Reply-To and References, quotes the original when quote_original=true). Follow the account's `writingStyleInstructions` from list_accounts when drafting the body. The reply is IMAP-appended to Sent (skipped on Gmail).\n\nHUMAN-IN-THE-LOOP — same approval gate as send_message: when the account has `requireSendApproval`, the reply is only queued (status=\"pending_approval\") and the owner must approve it at `approval_url` before it leaves the server.",
+        "Reply to an existing message (preserves In-Reply-To and References, quotes the original when quote_original=true). Follow the account's `writingStyleInstructions` from list_accounts when drafting the body. The reply is IMAP-appended to Sent (skipped on Gmail).\n\nHUMAN-IN-THE-LOOP — same approval gate as send_message: when the account has `requireSendApproval`, the reply is only queued (status=\"pending_approval\") and the owner must approve it at `approval_url` before it leaves the server — unless every recipient is on the account's `approvalAllowlist`, in which case it is sent at once (status=\"sent\"). With reply_all, Cc recipients count too.",
       inputSchema: {
         account_id: z.string().uuid(),
         folder: z.string(),
@@ -396,7 +406,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           .boolean()
           .optional()
           .describe(
-            "Force the human approval step even when the account does not require it. Cannot disable an account's own approval requirement.",
+            "Force the human approval step even when the account does not require it or all recipients are allowlisted. Cannot disable an account's own approval requirement.",
           ),
       },
     },

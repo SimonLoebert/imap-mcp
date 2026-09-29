@@ -26,6 +26,7 @@ export async function GET() {
       signatureHtml: mailAccounts.signatureHtml,
       writingStyle: mailAccounts.writingStyle,
       requireSendApproval: mailAccounts.requireSendApproval,
+      approvalAllowlist: mailAccounts.approvalAllowlist,
       isDefault: mailAccounts.isDefault,
       createdAt: mailAccounts.createdAt,
     })
@@ -80,6 +81,7 @@ export async function POST(req: Request) {
       writingStyle: input.writingStyle ?? null,
       // Human-in-the-loop is on unless the account owner opts out.
       requireSendApproval: input.requireSendApproval ?? true,
+      approvalAllowlist: input.approvalAllowlist ?? [],
       isDefault: input.isDefault ?? false,
     })
     .returning({ id: mailAccounts.id });

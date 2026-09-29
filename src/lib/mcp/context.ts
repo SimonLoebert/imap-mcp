@@ -27,6 +27,7 @@ export async function listUserAccounts(userId: string) {
       fromName: mailAccounts.fromName,
       writingStyle: mailAccounts.writingStyle,
       requireSendApproval: mailAccounts.requireSendApproval,
+      approvalAllowlist: mailAccounts.approvalAllowlist,
       isDefault: mailAccounts.isDefault,
     })
     .from(mailAccounts)
