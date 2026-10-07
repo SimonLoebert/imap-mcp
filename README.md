@@ -36,8 +36,9 @@ One container, one domain, your server, your keys.
 - 🚦 **Inbox status** — every received message is *new*, *unhandled*, *handled* or *on hold until a date*, so Claude keeps track of what you have been told and what still needs an answer across sessions; a dashboard at `/status` shows the same
 - ✋ **Human-in-the-loop approvals** — outgoing mail is parked in an approval queue and only reaches SMTP after you release it in the web UI (per-account, on by default)
 - ✍️ **PGP-signed mail by default** — every account gets its own OpenPGP key; outgoing mail is signed as PGP/MIME (RFC 3156) and carries the public key, and you can import your own key instead
+- 🔏 **PGP encryption both ways** — mail is encrypted automatically when every recipient has a key in your keyring (or on demand, with Web Key Directory lookup); encrypted mail you receive is decrypted and its signature verified before Claude reads it
 - 🔒 Credentials encrypted with **AES-256-GCM**; OAuth tokens stored as **SHA-256** hashes only
-- 🧰 **39 MCP tools**: 26 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals + message status + `get_pgp_public_key`) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`) + 5 contact tools (`list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`)
+- 🧰 **42 MCP tools**: 29 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals + message status + PGP keys) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`) + 5 contact tools (`list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`)
 - 🧪 **Test connection from the list** (IMAP `NOOP` + SMTP `VERIFY`, CalDAV principal-discovery) with per-account status badges and actionable error hints
 - ⚡ **Provider presets** on account creation: Gmail, Outlook / Microsoft 365, iCloud, Yahoo, Fastmail, OVH for email — iCloud, Fastmail, Nextcloud, OVH, Baïkal/generic for calendars
 - ⚠️ **Live port/SSL consistency warnings** — catches the `wrong version number` trap before it happens
@@ -232,6 +233,43 @@ Signing proves the mail came from you and was not altered; it does **not** encry
   what will happen, and the send result reports it under `pgp`.
 - The Sent-folder copy is byte-for-byte the signed message.
 
+### 3e. PGP encryption
+
+**Sending.** A message is sent as PGP/MIME `multipart/encrypted` (RFC 3156, signed and
+encrypted in one OpenPGP message) when
+
+- the MCP client passes `encrypt: true` — then it is encrypted *or not sent at all*; keys
+  that are missing from the keyring are looked up in the recipient domain's
+  [Web Key Directory](https://wiki.gnupg.org/WKD) first, and a message that still cannot be
+  encrypted is refused before it ever reaches the approval queue; or
+- the client leaves `encrypt` out, the account has *Encrypt automatically when every
+  recipient has a key* switched on (the default), and **every** To/Cc/Bcc recipient has a
+  usable key at the moment the message is sent. One recipient without a key and the message
+  goes out signed but unencrypted; the result says why under `pgp.notEncryptedReason`.
+
+`encrypt: false` forbids encryption. Replies to a message that arrived encrypted are
+encrypted by default, and replying to one unencrypted while quoting it is refused. Every
+encrypted message is also encrypted to the account's own key, so the Sent copy stays
+readable. Bcc recipients get a copy of their own, so their keys never show up in the copy
+the others receive. **The Subject line is not encrypted.** A message waiting in the approval
+queue is stored in clear text in your database, like every queued message.
+
+**Receiving.** `get_message`, `get_thread` and `get_attachment` decrypt PGP/MIME and inline
+PGP mail with the account's key (and with keys it used before — replacing a key keeps the
+old one for decryption) and verify signatures — `multipart/signed`, inline clear-signed and
+signed-and-encrypted — against the sender's key. The result carries a `pgp` object:
+`encrypted`, `decrypted`, `decryptionError`, and `signature.status` = `valid`, `invalid`
+(altered or forged) or `unknown_key`. IMAP body search cannot see inside encrypted mail.
+
+**Keyring.** `/keys` lists one public key per correspondent address. Keys get there when
+you paste them, when a Web Key Directory lookup finds one, or automatically from received
+mail: an `Autocrypt:` header or an attached `.asc` key for the sender's own address is
+stored the first time (trust on first use). A learned or MCP-imported key **never replaces**
+an existing one — a mismatch is reported as `keyConflict`, and only you can replace a key, on
+`/keys`. Outgoing mail carries an `Autocrypt:` header so Thunderbird, K-9/FairEmail and
+Delta Chat learn your key the same way. Your own accounts encrypt to each other without
+keyring entries.
+
 ### 4. Connect your MCP client
 
 Every signed-in user has a built-in guide at **`/connect`** with tabbed setup instructions
@@ -349,8 +387,13 @@ without `--force` first to see what it plans.
 | `reply_message`   | Reply preserving `In-Reply-To` / `References`; same Sent-folder and approval behavior as `send_message`. |
 | `get_pgp_public_key` | Return the account's armored OpenPGP public key, fingerprint and user IDs (generates a key if the account has none). Never returns the private key. |
 
+| `list_pgp_keys`   | List the keyring: one public key per correspondent address, with its source and whether it can encrypt. |
+| `find_pgp_key`    | Can mail to this address be encrypted? Checks own accounts, the keyring and the address's Web Key Directory (storing a key it finds). |
+| `import_pgp_key`  | Add a pasted key or the keys attached to a received message. Never replaces an existing key for an address. |
+
 Both send tools PGP/MIME-sign the message and attach the public key unless the account's
-defaults or `pgp_sign: false` / `attach_public_key: false` say otherwise.
+defaults or `pgp_sign: false` / `attach_public_key: false` say otherwise, and encrypt it
+as described in [3e](#3e-pgp-encryption) (`encrypt: true | false`, or automatic).
 
 ### Approvals (human-in-the-loop)
 
@@ -453,7 +496,8 @@ mail_accounts(id, user_id, label, email,
               signature_html, writing_style,
               require_send_approval, approval_allowlist[],
               pgp_private_key_enc, pgp_public_key, pgp_fingerprint,
-              pgp_sign_by_default, pgp_attach_public_key, is_default,
+              pgp_sign_by_default, pgp_attach_public_key, pgp_auto_encrypt,
+              pgp_previous_keys_enc[], is_default,
               status_tracking_since)
 pending_messages(id, user_id, account_id, kind, status,
                  subject, to_addresses[], cc_addresses[], bcc_addresses[],
@@ -469,6 +513,8 @@ message_statuses(id, user_id, account_id, message_key, status, hold_until, note,
                  folder, uid, subject, from_address, message_date,
                  updated_by_client_id, created_at, updated_at,
                  UNIQUE(account_id, message_key))
+pgp_keys(id, user_id, email, fingerprint, public_key, source,
+         created_at, updated_at, UNIQUE(user_id, email))
 oauth_clients(id, client_secret_hash, redirect_uris[], token_endpoint_auth_method)
 oauth_auth_codes(code, client_id, user_id, redirect_uri,
                  code_challenge, code_challenge_method, expires_at, consumed_at)
@@ -486,7 +532,9 @@ before this feature have no `addedBy` and are read as `"client"` — no migratio
 
 - Master key: AES-256-GCM, IV per ciphertext, authenticated. Ciphertext = `base64(iv(12) ‖ ct ‖ tag(16))`.
 - Passwords are never returned from the REST API — only their encrypted blob is stored.
-- PGP private keys are stored unlocked but encrypted with the master key (`pgp_private_key_enc`), never returned by the REST API or over MCP, and can only be replaced from the Clerk-authenticated account page. Signing runs in the same single send path as the approval gate, so a queued message is signed when it is approved, with the key the account has at that moment.
+- PGP private keys are stored unlocked but encrypted with the master key (`pgp_private_key_enc`), never returned by the REST API or over MCP, and can only be replaced from the Clerk-authenticated account page. Signing runs in the same single send path as the approval gate, so a queued message is signed when it is approved, with the key the account has at that moment. Replaced keys move to `pgp_previous_keys_enc` and are only used to decrypt.
+- Encryption is decided in that same path. `encrypt: true` can never degrade to clear text: a missing key fails the send. Recipient keys are fetched from Web Key Directories only over HTTPS, without redirects, with a 5 s timeout, and only for public DNS names (IP literals, `localhost`, `.local`/`.internal`-style names and hosts resolving to private addresses are skipped), so a recipient address cannot be used to probe internal hosts.
+- Keys learned from mail (Autocrypt, attachments) or imported over MCP are only stored for addresses without a key; swapping a correspondent's key is an owner-only action behind Clerk on `/api/pgp-keys`. A learned key is trust-on-first-use: the From address is not authenticated, so a `valid` signature from a learned key proves the sender is consistent, not who they are.
 - Access tokens are **opaque** random strings; DB stores only their SHA-256.
 - Refresh tokens rotate on every use (old one is revoked).
 - Signatures pass through DOMPurify server-side before storage *and* before being injected into outgoing mail.

@@ -31,13 +31,14 @@ export async function listUserAccounts(userId: string) {
       pgpFingerprint: mailAccounts.pgpFingerprint,
       pgpSignByDefault: mailAccounts.pgpSignByDefault,
       pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+      pgpAutoEncrypt: mailAccounts.pgpAutoEncrypt,
       isDefault: mailAccounts.isDefault,
     })
     .from(mailAccounts)
     .where(eq(mailAccounts.userId, userId))
     .orderBy(mailAccounts.createdAt);
 
-  return rows.map(({ pgpFingerprint, pgpSignByDefault, pgpAttachPublicKey, ...r }) => {
+  return rows.map(({ pgpFingerprint, pgpSignByDefault, pgpAttachPublicKey, pgpAutoEncrypt, ...r }) => {
     const style: WritingStyle | null = r.writingStyle ?? null;
     return {
       ...r,
@@ -45,6 +46,7 @@ export async function listUserAccounts(userId: string) {
         fingerprint: pgpFingerprint,
         signByDefault: pgpSignByDefault,
         attachPublicKey: pgpAttachPublicKey,
+        autoEncrypt: pgpAutoEncrypt,
       },
       writingStyle: isEmptyStyle(style) ? null : style,
       writingStyleInstructions: isEmptyStyle(style)

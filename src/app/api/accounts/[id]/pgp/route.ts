@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { mailAccounts } from "@/lib/db/schema";
 import { getCurrentUserRowId } from "@/lib/auth/clerk";
@@ -69,9 +69,14 @@ export async function POST(
     );
   }
 
+  // The outgoing key is retired, not dropped: mail already encrypted to it
+  // has to stay readable.
   await db
     .update(mailAccounts)
     .set({
+      pgpPreviousKeysEnc: sql`case when ${mailAccounts.pgpPrivateKeyEnc} is null
+        then ${mailAccounts.pgpPreviousKeysEnc}
+        else array_append(${mailAccounts.pgpPreviousKeysEnc}, ${mailAccounts.pgpPrivateKeyEnc}) end`,
       pgpPrivateKeyEnc: material.privateKeyEnc,
       pgpPublicKey: material.publicKey,
       pgpFingerprint: material.fingerprint,

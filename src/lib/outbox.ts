@@ -84,6 +84,7 @@ type SummaryAccount = {
   email: string;
   pgpSignByDefault?: boolean;
   pgpAttachPublicKey?: boolean;
+  pgpAutoEncrypt?: boolean;
 };
 
 function summarize(row: Row, account: SummaryAccount): PendingMessageSummary {
@@ -104,6 +105,12 @@ function summarize(row: Row, account: SummaryAccount): PendingMessageSummary {
     includeSignature: payload.includeSignature ?? false,
     pgpSign: payload.pgpSign ?? account.pgpSignByDefault ?? false,
     attachPublicKey: payload.attachPublicKey ?? account.pgpAttachPublicKey ?? false,
+    encryption:
+      payload.encrypt === true
+        ? "required"
+        : payload.encrypt === false || !account.pgpAutoEncrypt
+          ? "off"
+          : "auto",
     attachments: attachmentSummaries(payload),
     replyTo:
       row.replyFolder && row.replyUid !== null
@@ -161,6 +168,7 @@ export async function queueForApproval(input: QueueInput): Promise<PendingMessag
     includeSignature: input.mail.includeSignature,
     pgpSign: input.mail.pgpSign,
     attachPublicKey: input.mail.attachPublicKey,
+    encrypt: input.mail.encrypt,
     attachments: input.mail.attachments?.map((a) => ({
       filename: sanitizeAttachmentFilename(a.filename),
       contentBase64: a.contentBase64,
@@ -394,6 +402,7 @@ export async function retryFailed(userId: string, id: string): Promise<PendingMe
       email: mailAccounts.email,
       pgpSignByDefault: mailAccounts.pgpSignByDefault,
       pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+      pgpAutoEncrypt: mailAccounts.pgpAutoEncrypt,
     })
     .from(mailAccounts)
     .where(eq(mailAccounts.id, row.accountId))
@@ -427,6 +436,7 @@ async function decide(
       email: mailAccounts.email,
       pgpSignByDefault: mailAccounts.pgpSignByDefault,
       pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+      pgpAutoEncrypt: mailAccounts.pgpAutoEncrypt,
     })
     .from(mailAccounts)
     .where(eq(mailAccounts.id, row.accountId))
@@ -590,6 +600,7 @@ async function withAccount(row: Row): Promise<PendingMessageSummary> {
       email: mailAccounts.email,
       pgpSignByDefault: mailAccounts.pgpSignByDefault,
       pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+      pgpAutoEncrypt: mailAccounts.pgpAutoEncrypt,
     })
     .from(mailAccounts)
     .where(eq(mailAccounts.id, row.accountId))

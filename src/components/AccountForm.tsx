@@ -28,6 +28,7 @@ export interface AccountFormValues {
   approvalAllowlist: string[];
   pgpSignByDefault: boolean;
   pgpAttachPublicKey: boolean;
+  pgpAutoEncrypt: boolean;
   isDefault: boolean;
 }
 
@@ -51,6 +52,7 @@ const empty: AccountFormValues = {
   approvalAllowlist: [],
   pgpSignByDefault: true,
   pgpAttachPublicKey: true,
+  pgpAutoEncrypt: true,
   isDefault: false,
 };
 
@@ -362,10 +364,12 @@ export function AccountForm({
       </div>
 
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3 style={{ marginBottom: 4 }}>PGP signing</h3>
+        <h3 style={{ marginBottom: 4 }}>PGP signing &amp; encryption</h3>
         <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
           Outgoing mail is signed as PGP/MIME with this account&apos;s own key, so recipients can
-          verify it came from you and was not altered. Signing does not encrypt the message.
+          verify it came from you and was not altered. Mail to people whose key is in your{" "}
+          <a href="/keys">PGP keyring</a> can be encrypted as well; encrypted mail you receive
+          is decrypted with this key.
         </p>
         <label className="checkbox-row">
           <input
@@ -382,6 +386,14 @@ export function AccountForm({
             onChange={(e) => update("pgpAttachPublicKey", e.target.checked)}
           />
           Attach my public key to outgoing mail
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={values.pgpAutoEncrypt}
+            onChange={(e) => update("pgpAutoEncrypt", e.target.checked)}
+          />
+          Encrypt automatically when every recipient has a key (the subject stays readable)
         </label>
         {mode === "create" ? (
           <p className="muted" style={{ fontSize: 13, marginTop: 12 }}>

@@ -162,26 +162,20 @@ export function publicKeyFilename(fingerprint: string): string {
 }
 
 /**
- * Turn a composed RFC 5322 message into a PGP/MIME signed one (RFC 3156):
- *
- *   multipart/signed; protocol="application/pgp-signature"
- *     ├─ the original body with its Content-* headers   ← signed bytes
- *     └─ application/pgp-signature (detached, armored)
- *
- * Every non-Content-* header (From, To, Subject, Message-ID, …) stays on the
- * outer message, so the Message-ID and envelope are unchanged. The input must
- * use CRLF line endings and 7-bit safe transfer encodings, which is what
- * nodemailer produces with `textEncoding: "quoted-printable"`.
+ * Split a composed RFC 5322 message into the headers that stay on the outer
+ * message (From, To, Subject, Message-ID, …) and the MIME entity that carries
+ * the content (its Content-* headers plus the body). The entity is returned in
+ * canonical CRLF form, which is what RFC 3156 signs and encrypts.
  */
-export async function signMimeMessage(raw: Buffer, privateKeyEnc: string): Promise<Buffer> {
+function splitMessage(raw: Buffer): { outerFields: string[]; entity: string } {
   // latin1 maps bytes 1:1, so slicing the string and converting back never
-  // alters a byte even if something 8-bit slipped through.
-  // RFC 3156 signs the canonical (CRLF) form. nodemailer keeps bare LFs from
-  // the body text in quoted-printable parts and leaves it to the SMTP data
-  // stream to fix them up — after we signed, which would break the signature.
+  // alters a byte even if something 8-bit slipped through. nodemailer keeps
+  // bare LFs from the body text in quoted-printable parts and leaves it to the
+  // SMTP data stream to fix them up — after we signed, which would break the
+  // signature — so canonicalise here.
   const source = raw.toString("latin1").replace(/\r?\n/g, "\r\n");
   const split = source.indexOf("\r\n\r\n");
-  if (split < 0) throw new Error("cannot sign: message has no header/body separator");
+  if (split < 0) throw new Error("cannot wrap message: no header/body separator");
 
   const fields = unfoldHeaderFields(source.slice(0, split));
   const body = source.slice(split + 4);
@@ -190,11 +184,38 @@ export async function signMimeMessage(raw: Buffer, privateKeyEnc: string): Promi
   if (!contentFields.some((f) => /^content-type:/i.test(f))) {
     contentFields.unshift("Content-Type: text/plain; charset=us-ascii");
   }
+  return { outerFields, entity: `${contentFields.join("\r\n")}\r\n\r\n${body}` };
+}
 
-  const signedPart = `${contentFields.join("\r\n")}\r\n\r\n${body}`;
+function newBoundary(avoid: string): string {
+  let boundary: string;
+  do {
+    boundary = `----PGP-${randomBytes(12).toString("hex")}`;
+  } while (avoid.includes(boundary));
+  return boundary;
+}
+
+function crlf(armored: string): string {
+  return armored.replace(/\r?\n/g, "\r\n").replace(/\r\n$/, "");
+}
+
+/**
+ * Turn a composed RFC 5322 message into a PGP/MIME signed one (RFC 3156 §5):
+ *
+ *   multipart/signed; protocol="application/pgp-signature"
+ *     ├─ the original body with its Content-* headers   ← signed bytes
+ *     └─ application/pgp-signature (detached, armored)
+ *
+ * Every non-Content-* header stays on the outer message, so the Message-ID
+ * and envelope are unchanged. The input should use 7-bit safe transfer
+ * encodings, which is what nodemailer produces with
+ * `textEncoding: "quoted-printable"`.
+ */
+export async function signMimeMessage(raw: Buffer, privateKeyEnc: string): Promise<Buffer> {
+  const { outerFields, entity } = splitMessage(raw);
   const signingKey = await openpgp.readPrivateKey({ armoredKey: decrypt(privateKeyEnc) });
   const armoredSignature = (await openpgp.sign({
-    message: await openpgp.createMessage({ binary: Buffer.from(signedPart, "latin1") }),
+    message: await openpgp.createMessage({ binary: Buffer.from(entity, "latin1") }),
     signingKeys: signingKey,
     detached: true,
     format: "armored",
@@ -205,11 +226,7 @@ export async function signMimeMessage(raw: Buffer, privateKeyEnc: string): Promi
   const hashName =
     Object.entries(openpgp.enums.hash).find(([, value]) => value === hashId)?.[0] ?? "sha256";
   const micalg = `pgp-${hashName.toLowerCase()}`;
-
-  let boundary: string;
-  do {
-    boundary = `----PGP-${randomBytes(12).toString("hex")}`;
-  } while (signedPart.includes(boundary));
+  const boundary = newBoundary(entity);
 
   const out = [
     ...outerFields,
@@ -217,17 +234,122 @@ export async function signMimeMessage(raw: Buffer, privateKeyEnc: string): Promi
     "",
     "This is an OpenPGP/MIME signed message (RFC 4880 and 3156)",
     `--${boundary}`,
-    signedPart,
+    entity,
     `--${boundary}`,
     'Content-Type: application/pgp-signature; name="OpenPGP_signature.asc"',
     "Content-Description: OpenPGP digital signature",
     'Content-Disposition: attachment; filename="OpenPGP_signature.asc"',
     "",
-    armoredSignature.replace(/\r?\n/g, "\r\n").replace(/\r\n$/, ""),
+    crlf(armoredSignature),
     `--${boundary}--`,
     "",
   ].join("\r\n");
   return Buffer.from(out, "latin1");
+}
+
+/**
+ * Turn a composed message into a PGP/MIME encrypted one (RFC 3156 §4), signed
+ * and encrypted in one OpenPGP message (§6.2) when a signing key is given:
+ *
+ *   multipart/encrypted; protocol="application/pgp-encrypted"
+ *     ├─ application/pgp-encrypted   "Version: 1"
+ *     └─ application/octet-stream    the armored OpenPGP message
+ *
+ * Only the MIME entity is encrypted — the outer headers, Subject included,
+ * travel in clear text.
+ */
+export async function encryptMimeMessage(
+  raw: Buffer,
+  encryptionKeys: openpgp.PublicKey[],
+  signingKeyEnc: string | null,
+): Promise<Buffer> {
+  if (!encryptionKeys.length) throw new Error("cannot encrypt: no recipient keys");
+  const { outerFields, entity } = splitMessage(raw);
+  const signingKeys = signingKeyEnc
+    ? await openpgp.readPrivateKey({ armoredKey: decrypt(signingKeyEnc) })
+    : undefined;
+  const armored = (await openpgp.encrypt({
+    message: await openpgp.createMessage({ binary: Buffer.from(entity, "latin1") }),
+    encryptionKeys,
+    signingKeys,
+    format: "armored",
+  })) as string;
+  const boundary = newBoundary(armored);
+
+  const out = [
+    ...outerFields,
+    `Content-Type: multipart/encrypted;\r\n protocol="application/pgp-encrypted";\r\n boundary="${boundary}"`,
+    "",
+    "This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156)",
+    `--${boundary}`,
+    "Content-Type: application/pgp-encrypted",
+    "Content-Description: PGP/MIME version identification",
+    "",
+    "Version: 1",
+    "",
+    `--${boundary}`,
+    'Content-Type: application/octet-stream; name="encrypted.asc"',
+    "Content-Description: OpenPGP encrypted message",
+    'Content-Disposition: inline; filename="encrypted.asc"',
+    "",
+    crlf(armored),
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+  return Buffer.from(out, "latin1");
+}
+
+/**
+ * An `Autocrypt:` header line (folded) announcing the account's key, so
+ * Thunderbird, K-9/FairEmail, Delta Chat and this server can pick it up and
+ * encrypt replies. Returns null when the key has no user ID for `email`.
+ */
+export async function autocryptHeader(email: string, publicKey: string): Promise<string | null> {
+  const key = await openpgp.readKey({ armoredKey: publicKey });
+  const addr = email.trim().toLowerCase();
+  if (!keyEmails(key).includes(addr)) return null;
+  const keydata = Buffer.from(key.write()).toString("base64");
+  const lines = keydata.match(/.{1,76}/g) ?? [];
+  return `Autocrypt: addr=${addr}; keydata=\r\n ${lines.join("\r\n ")}`;
+}
+
+/** Insert extra header fields at the top of a composed message. */
+export function prependHeaders(raw: Buffer, fields: string[]): Buffer {
+  if (!fields.length) return raw;
+  return Buffer.concat([Buffer.from(fields.join("\r\n") + "\r\n", "latin1"), raw]);
+}
+
+export async function readPublicKey(armoredKey: string): Promise<openpgp.PublicKey> {
+  return openpgp.readKey({ armoredKey }) as Promise<openpgp.PublicKey>;
+}
+
+/** Lower-cased e-mail addresses in a key's user IDs. */
+export function keyEmails(key: openpgp.Key): string[] {
+  const out = new Set<string>();
+  for (const uid of key.users) {
+    const email = uid.userID?.email?.trim().toLowerCase();
+    if (email) out.add(email);
+  }
+  return [...out];
+}
+
+/** The account's current and retired private keys, for decryption. */
+export async function accountDecryptionKeys(acc: {
+  pgpPrivateKeyEnc: string | null;
+  pgpPreviousKeysEnc: string[];
+}): Promise<openpgp.PrivateKey[]> {
+  const stored = [acc.pgpPrivateKeyEnc, ...acc.pgpPreviousKeysEnc].filter(
+    (k): k is string => Boolean(k),
+  );
+  const keys: openpgp.PrivateKey[] = [];
+  for (const enc of stored) {
+    try {
+      keys.push(await openpgp.readPrivateKey({ armoredKey: decrypt(enc) }));
+    } catch {
+      // A key that no longer decrypts (master key rotated) only costs us old mail.
+    }
+  }
+  return keys;
 }
 
 /** Split a header block into whole fields, keeping folded continuation lines attached. */

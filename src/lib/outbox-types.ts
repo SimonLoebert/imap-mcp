@@ -62,6 +62,8 @@ export interface PendingMessagePayload {
   /** Per-message PGP overrides; absent means "use the account's setting at send time". */
   pgpSign?: boolean;
   attachPublicKey?: boolean;
+  /** true = must be encrypted, false = never, absent = account's auto-encrypt setting. */
+  encrypt?: boolean;
 }
 
 /** Attachment metadata without the base64 blob. */
@@ -102,6 +104,11 @@ export interface PendingMessageSummary {
   pgpSign: boolean;
   /** Whether the account's public key will be (or was) attached. */
   attachPublicKey: boolean;
+  /**
+   * "required": sent encrypted or not at all; "auto": encrypted if every
+   * recipient has a key when it is sent; "off": sent in clear text.
+   */
+  encryption: "required" | "auto" | "off";
   attachments: PendingAttachmentSummary[];
   replyTo: { folder: string; uid: number } | null;
   requestedByClientId: string | null;

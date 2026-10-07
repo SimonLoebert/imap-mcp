@@ -55,6 +55,7 @@ export default async function EditAccountPage({
           approvalAllowlist: acc.approvalAllowlist,
           pgpSignByDefault: acc.pgpSignByDefault,
           pgpAttachPublicKey: acc.pgpAttachPublicKey,
+          pgpAutoEncrypt: acc.pgpAutoEncrypt,
           isDefault: acc.isDefault,
         }}
         pgpKey={pgpKey}

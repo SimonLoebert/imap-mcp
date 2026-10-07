@@ -48,7 +48,7 @@ export function PgpKeyPanel({
     if (
       pgpKey &&
       !confirm(
-        "Replace the current key with a new one? Recipients who saved the old public key will see a different key on your next signed mail.",
+        "Replace the current key with a new one? Recipients who saved the old public key will see a different key on your next signed mail. The old key is kept to decrypt mail already sent to it.",
       )
     ) {
       return;

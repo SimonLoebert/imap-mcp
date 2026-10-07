@@ -37,6 +37,9 @@ export async function TopNav() {
         <Link href="/contacts" className="btn btn-ghost btn-sm">
           Contacts
         </Link>
+        <Link href="/keys" className="btn btn-ghost btn-sm">
+          PGP keys
+        </Link>
         <Link href="/status" className="btn btn-ghost btn-sm">
           Inbox status
           {attention > 0 && (

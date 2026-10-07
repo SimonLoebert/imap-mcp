@@ -31,6 +31,7 @@ export async function GET() {
       pgpFingerprint: mailAccounts.pgpFingerprint,
       pgpSignByDefault: mailAccounts.pgpSignByDefault,
       pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+      pgpAutoEncrypt: mailAccounts.pgpAutoEncrypt,
       isDefault: mailAccounts.isDefault,
       createdAt: mailAccounts.createdAt,
     })
@@ -97,6 +98,7 @@ export async function POST(req: Request) {
       approvalAllowlist: input.approvalAllowlist ?? [],
       pgpSignByDefault,
       pgpAttachPublicKey,
+      pgpAutoEncrypt: input.pgpAutoEncrypt ?? true,
       pgpPrivateKeyEnc: pgpKey?.privateKeyEnc ?? null,
       pgpPublicKey: pgpKey?.publicKey ?? null,
       pgpFingerprint: pgpKey?.fingerprint ?? null,

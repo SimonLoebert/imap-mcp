@@ -22,6 +22,7 @@ export const accountCreateSchema = z.object({
   approvalAllowlist: allowlistSchema.optional(),
   pgpSignByDefault: z.boolean().optional(),
   pgpAttachPublicKey: z.boolean().optional(),
+  pgpAutoEncrypt: z.boolean().optional(),
   isDefault: z.boolean().optional(),
 });
 
@@ -39,6 +40,12 @@ export const pgpKeyActionSchema = z.discriminatedUnion("action", [
     passphrase: z.string().max(1000).optional(),
   }),
 ]);
+
+/** Owner-side keyring import; `replace` may overwrite an existing key for an address. */
+export const keyringImportSchema = z.object({
+  armoredKey: z.string().min(1).max(500_000),
+  replace: z.boolean().optional(),
+});
 
 export type AccountCreateInput = z.infer<typeof accountCreateSchema>;
 export type AccountUpdateInput = z.infer<typeof accountUpdateSchema>;

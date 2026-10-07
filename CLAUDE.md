@@ -34,7 +34,10 @@ src/app/api/mcp/route.ts     Bearer-auth + Streamable HTTP transport → buildMc
 src/lib/mcp/server.ts        Every MCP tool. One registerTool() call per tool.
 src/lib/mcp/context.ts       Per-request context ({userId, clientId}) + account loaders
 src/lib/imap.ts              All IMAP work (imapflow), folder/message/attachment helpers
-src/lib/smtp.ts              All SMTP work (nodemailer) + signature handling
+src/lib/smtp.ts              All SMTP work (nodemailer) + signature handling + sign/encrypt decision
+src/lib/pgp.ts               Account OpenPGP keys, PGP/MIME signing/encryption, Autocrypt header
+src/lib/pgp-keyring.ts       Correspondents' public keys (pgp_keys), WKD lookup, key resolution
+src/lib/pgp-receive.ts       openMessage(): decrypt + verify received mail, learn sender keys
 src/lib/caldav.ts            All CalDAV work (tsdav) + ical.js parsing
 src/lib/outbox.ts            Human-in-the-loop approval queue (state machine)
 src/lib/contacts.ts          Address book queries (shared by REST and MCP)
@@ -52,8 +55,8 @@ src/components/              Client components ("use client") + the shared TopNa
 
 **Two auth realms, never mixed.** MCP clients authenticate with an OAuth bearer token
 (`resolveAccessToken`), humans authenticate with Clerk (`getCurrentUserRowId`). An MCP
-token must never reach a `/api/accounts`, `/api/calendar-accounts`, `/api/contacts` or
-`/api/outbox` route, and Clerk auth must never reach `/api/mcp`. New protected routes go
+token must never reach a `/api/accounts`, `/api/calendar-accounts`, `/api/contacts`,
+`/api/pgp-keys` or `/api/outbox` route, and Clerk auth must never reach `/api/mcp`. New protected routes go
 into the `isProtectedRoute` matcher in `src/middleware.ts`.
 
 **Every query is scoped to the user.** Load accounts through `requireAccount` /
@@ -74,6 +77,12 @@ When `mailAccounts.requireSendApproval` is set (the default), the message is par
   twice.
 - Any new send path (a scheduled send, a forward tool, …) must route through
   `dispatchOrQueue` too.
+
+**PGP rules.** Read full messages through `openMessage` (src/lib/pgp-receive.ts) so
+encrypted mail is decrypted the same way everywhere and attachment indices stay stable.
+`encrypt: true` must never degrade to clear text. Private keys (`pgpPrivateKeyEnc`,
+`pgpPreviousKeysEnc`) never leave the server. Learned or MCP-imported keys may only fill an
+empty keyring slot; replacing a correspondent's key is owner-only (`/api/pgp-keys`).
 
 **Sanitize any HTML that round-trips through the server.** Signatures go through
 `sanitizeSignatureHtml`, queued message bodies through `sanitizeBodyHtml` in

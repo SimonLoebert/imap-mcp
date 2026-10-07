@@ -75,6 +75,17 @@ export const mailAccounts = pgTable(
     pgpSignByDefault: boolean("pgp_sign_by_default").notNull().default(true),
     /** Attach the public key (`OpenPGP_0x….asc`) to outgoing mail. */
     pgpAttachPublicKey: boolean("pgp_attach_public_key").notNull().default(true),
+    /**
+     * Encrypt outgoing mail automatically whenever every recipient has a
+     * usable key in the user's keyring (`pgp_keys`). A send can still demand
+     * or refuse encryption explicitly.
+     */
+    pgpAutoEncrypt: boolean("pgp_auto_encrypt").notNull().default(true),
+    /**
+     * Keys this account used before the current one, each encrypted like
+     * `pgpPrivateKeyEnc`. Kept only to decrypt mail sent to an older key.
+     */
+    pgpPreviousKeysEnc: text("pgp_previous_keys_enc").array().notNull().default([]),
     isDefault: boolean("is_default").notNull().default(false),
     /**
      * Messages that arrived before this instant and carry no stored status
@@ -272,6 +283,32 @@ export const messageStatuses = pgTable(
   ],
 );
 
+/**
+ * The user's OpenPGP keyring: one public key per correspondent address, used
+ * to encrypt mail to them and to verify their signatures. Addresses are stored
+ * lower-cased. Keys come from the web UI, from Web Key Directory lookups, or
+ * are learned from received mail (Autocrypt header or attached key) — learning
+ * never replaces a key that is already there.
+ */
+export const pgpKeys = pgTable(
+  "pgp_keys",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    publicKey: text("public_key").notNull(),
+    source: text("source").$type<PgpKeySource>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("pgp_keys_user_email_idx").on(t.userId, t.email)],
+);
+
+export type PgpKeySource = "manual" | "wkd" | "autocrypt" | "attachment" | "mcp";
+
 export type User = typeof users.$inferSelect;
 export type PendingMessage = typeof pendingMessages.$inferSelect;
 export type NewPendingMessage = typeof pendingMessages.$inferInsert;
@@ -281,6 +318,7 @@ export type CalendarAccount = typeof calendarAccounts.$inferSelect;
 export type NewCalendarAccount = typeof calendarAccounts.$inferInsert;
 export type MessageStatusRow = typeof messageStatuses.$inferSelect;
 export type Contact = typeof contacts.$inferSelect;
+export type PgpKeyRow = typeof pgpKeys.$inferSelect;
 export type NewContact = typeof contacts.$inferInsert;
 export type OAuthClient = typeof oauthClients.$inferSelect;
 export type OAuthAuthCode = typeof oauthAuthCodes.$inferSelect;

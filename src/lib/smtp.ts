@@ -5,11 +5,17 @@ import { decrypt } from "@/lib/crypto";
 import type { MailAccount } from "@/lib/db/schema";
 import { saveToSentFolder, type AccountLike } from "@/lib/imap";
 import {
+  autocryptHeader,
+  encryptMimeMessage,
   ensureAccountPgpKey,
+  prependHeaders,
   publicKeyFilename,
+  readPublicKey,
   signMimeMessage,
   type PgpAccountLike,
 } from "@/lib/pgp";
+import { resolveRecipientKeys, type ResolvedKey } from "@/lib/pgp-keyring";
+import { parseRecipients } from "@/lib/allowlist";
 
 export type SmtpAccountLike = Pick<
   MailAccount,
@@ -23,6 +29,7 @@ export type SmtpAccountLike = Pick<
   | "signatureHtml"
   | "pgpSignByDefault"
   | "pgpAttachPublicKey"
+  | "pgpAutoEncrypt"
 > &
   AccountLike &
   PgpAccountLike;
@@ -94,6 +101,12 @@ export interface SendMailInput {
   pgpSign?: boolean;
   /** Attach the account's public key. Falls back to `pgpAttachPublicKey`. */
   attachPublicKey?: boolean;
+  /**
+   * true → encrypt or fail (looking up missing keys via WKD), false → never
+   * encrypt, undefined → encrypt when the account has `pgpAutoEncrypt` and
+   * every recipient already has a key.
+   */
+  encrypt?: boolean;
 }
 
 export interface SendMailResult {
@@ -109,6 +122,11 @@ export interface SendMailResult {
   };
   pgp: {
     signed: boolean;
+    encrypted: boolean;
+    /** Recipients the message was encrypted to (the sender's own key is always added). */
+    encryptedTo: string[];
+    /** Why an automatic encryption did not happen, if it did not. */
+    notEncryptedReason?: string;
     publicKeyAttached: boolean;
     fingerprint: string | null;
   };
@@ -154,7 +172,7 @@ function buildRawMime(
   mailOptions: Parameters<typeof nodemailer.createTransport>[0] extends never
     ? never
     : Parameters<nodemailer.Transporter["sendMail"]>[0],
-): Promise<{ raw: Buffer; envelope: nodemailer.SendMailOptions["envelope"]; messageId: string }> {
+): Promise<{ raw: Buffer; envelope: { from: string; to: string[] }; messageId: string }> {
   return new Promise((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const composer = new MailComposer(mailOptions as any);
@@ -179,7 +197,41 @@ export async function sendMail(
     const { text, html } = appendSignature(acc, input);
     const pgpSign = input.pgpSign ?? acc.pgpSignByDefault;
     const attachPublicKey = input.attachPublicKey ?? acc.pgpAttachPublicKey;
-    const pgpKey = pgpSign || attachPublicKey ? await ensureAccountPgpKey(acc) : null;
+
+    // Decide on encryption before anything is composed: a demanded encryption
+    // that cannot happen must fail the send, never fall back to clear text.
+    const toCc = [...parseRecipients(input.to), ...parseRecipients(input.cc)];
+    const bccList = parseRecipients(input.bcc);
+    const encryptMode =
+      input.encrypt === true
+        ? "required"
+        : input.encrypt === false
+          ? "off"
+          : acc.pgpAutoEncrypt
+            ? "auto"
+            : "off";
+    let recipientKeys: Map<string, ResolvedKey> | null = null;
+    let notEncryptedReason: string | undefined;
+    if (encryptMode !== "off") {
+      const { keys, missing } = await resolveRecipientKeys(acc.userId, [...toCc, ...bccList], {
+        wkd: encryptMode === "required",
+      });
+      if (missing.length === 0) {
+        recipientKeys = keys;
+      } else if (encryptMode === "required") {
+        throw new Error(
+          `Cannot encrypt: no usable PGP key for ${missing.join(", ")}. Nothing was sent.`,
+        );
+      } else {
+        notEncryptedReason = `no PGP key for ${missing.join(", ")}`;
+      }
+    } else {
+      notEncryptedReason = input.encrypt === false ? "encrypt=false" : "auto-encrypt is off";
+    }
+    const encrypt = recipientKeys !== null;
+
+    const pgpKey =
+      pgpSign || attachPublicKey || encrypt ? await ensureAccountPgpKey(acc) : null;
 
     const attachments: NonNullable<nodemailer.SendMailOptions["attachments"]> =
       input.attachments?.map((a) => ({
@@ -212,7 +264,7 @@ export async function sendMail(
       // A signature covers the exact bytes, so keep the signed part 7-bit:
       // quoted-printable also protects trailing whitespace and long lines
       // from being rewritten by relays on the way.
-      textEncoding: pgpSign ? "quoted-printable" : undefined,
+      textEncoding: pgpSign || encrypt ? "quoted-printable" : undefined,
     };
 
     // Compose the raw MIME once so we can both feed it to SMTP and APPEND
@@ -221,10 +273,42 @@ export async function sendMail(
     // multipart boundaries).
     const composed = await buildRawMime(mailOptions);
     const { envelope, messageId } = composed;
-    const raw =
-      pgpSign && pgpKey ? await signMimeMessage(composed.raw, pgpKey.privateKeyEnc) : composed.raw;
+    const autocrypt =
+      pgpKey && attachPublicKey ? await autocryptHeader(acc.email, pgpKey.publicKey) : null;
+    const base = prependHeaders(composed.raw, autocrypt ? [autocrypt] : []);
+    const selfKey = pgpKey && encrypt ? await readPublicKey(pgpKey.publicKey) : null;
 
-    const info = await transport.sendMail({ envelope, raw, messageId });
+    const wrap = async (addresses: string[]): Promise<Buffer> => {
+      if (encrypt && pgpKey && selfKey) {
+        const keys = addresses.map((a) => recipientKeys!.get(a)!.key);
+        return encryptMimeMessage(base, [...keys, selfKey], pgpSign ? pgpKey.privateKeyEnc : null);
+      }
+      if (pgpSign && pgpKey) return signMimeMessage(base, pgpKey.privateKeyEnc);
+      return base;
+    };
+
+    // Encrypting to Bcc keys in the copy everyone gets would reveal the Bcc
+    // recipients through the key IDs in it, so each Bcc recipient gets a copy
+    // of their own. The To/Cc copy is the one saved to Sent.
+    const splitBcc = encrypt && bccList.length > 0;
+    const raw = await wrap(splitBcc ? toCc : [...toCc, ...bccList]);
+    const accepted: string[] = [];
+    const rejected: string[] = [];
+    let serverMessageId: string | undefined;
+    const deliver = async (env: typeof envelope, bytes: Buffer) => {
+      const info = await transport.sendMail({ envelope: env, raw: bytes, messageId });
+      serverMessageId ??= info.messageId;
+      accepted.push(...((info.accepted as string[]) ?? []));
+      rejected.push(...((info.rejected as string[]) ?? []));
+    };
+    if (!splitBcc) {
+      await deliver(envelope, raw);
+    } else {
+      if (toCc.length) await deliver({ ...envelope, to: toCc }, raw);
+      for (const b of bccList) {
+        await deliver({ ...envelope, to: [b] }, await wrap([...toCc, b]));
+      }
+    }
 
     const shouldAppend =
       input.saveToSent === true
@@ -260,12 +344,15 @@ export async function sendMail(
     }
 
     return {
-      messageId: info.messageId ?? messageId,
-      accepted: (info.accepted as string[]) ?? [],
-      rejected: (info.rejected as string[]) ?? [],
+      messageId: serverMessageId ?? messageId,
+      accepted,
+      rejected,
       savedToSent,
       pgp: {
         signed: Boolean(pgpSign && pgpKey),
+        encrypted: encrypt,
+        encryptedTo: encrypt ? [...toCc, ...bccList] : [],
+        notEncryptedReason: encrypt ? undefined : notEncryptedReason,
         publicKeyAttached: Boolean(attachPublicKey && pgpKey),
         fingerprint: pgpKey?.fingerprint ?? null,
       },
