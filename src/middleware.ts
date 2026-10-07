@@ -5,10 +5,12 @@ const isProtectedRoute = createRouteMatcher([
   "/accounts(.*)",
   "/calendars(.*)",
   "/outbox(.*)",
+  "/contacts(.*)",
   "/connect(.*)",
   "/api/accounts(.*)",
   "/api/calendar-accounts(.*)",
   "/api/outbox(.*)",
+  "/api/contacts(.*)",
   "/api/oauth/authorize(.*)",
 ]);
 

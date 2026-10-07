@@ -29,6 +29,9 @@ export async function TopNav() {
         <Link href="/calendars" className="btn btn-ghost btn-sm">
           My calendars
         </Link>
+        <Link href="/contacts" className="btn btn-ghost btn-sm">
+          Contacts
+        </Link>
         <Link href="/outbox" className="btn btn-ghost btn-sm">
           Approvals
           {pending > 0 && (

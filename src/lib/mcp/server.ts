@@ -54,6 +54,29 @@ import {
   listEvents,
   updateEvent,
 } from "@/lib/caldav";
+import {
+  createContact,
+  deleteContact,
+  listContacts,
+  requireContact,
+  updateContact,
+} from "@/lib/contacts";
+import { contactLimits } from "@/lib/validation/contact";
+
+const contactEmailsSchema = z
+  .array(z.string().trim().email())
+  .max(contactLimits.emails)
+  .describe("Email addresses, primary first. Stored lower-cased.");
+const contactPhonesSchema = z
+  .array(z.string().trim().min(1).max(contactLimits.phone))
+  .max(contactLimits.phones)
+  .describe("Phone numbers as free text, e.g. \"+49 30 1234567\".");
+const contactTagsSchema = z
+  .array(z.string().trim().min(1).max(contactLimits.tag))
+  .max(contactLimits.tags)
+  .describe("Free-form labels such as \"family\" or \"client\". Stored lower-cased.");
+const contactTextSchema = (max: number, what: string) =>
+  z.string().trim().max(max).nullable().optional().describe(what);
 
 function attachmentDownloadUrl(
   userId: string,
@@ -191,7 +214,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       capabilities: { tools: {} },
       instructions:
-        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. Exception: when EVERY recipient (To, Cc and Bcc) is on the account's `approvalAllowlist` (full addresses or `@domain` entries, exact domain match only), the message is sent immediately and the response says status=\"sent\". One recipient outside the list sends the whole message to approval. Always read `status` in the response instead of predicting it. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.",
+        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. Exception: when EVERY recipient (To, Cc and Bcc) is on the account's `approvalAllowlist` (full addresses or `@domain` entries, exact domain match only), the message is sent immediately and the response says status=\"sent\". One recipient outside the list sends the whole message to approval. Always read `status` in the response instead of predicting it. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.\n\nCONTACTS — The user keeps an address book of the people they write to regularly. When the user names a recipient (\"mail Anna\"), look the person up with list_contacts and use the stored address instead of guessing one; if several contacts match, ask which one. A contact's `salutation` says how to greet them and overrides the writing style's default greeting for that recipient; `notes` carry context the user wants you to know. Before create_contact, search by address first — an address can belong to only one contact, so a duplicate is refused with the existing contact's id. Contacts are independent of the mail accounts: saving a contact never sends anything, and a contact's address still goes through the normal approval gate.",
     },
   );
 
@@ -1265,6 +1288,147 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           workHours: args.work_hours,
         });
         return jsonResult({ free_slots: slots });
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_contacts",
+    {
+      title: "List or search contacts",
+      description:
+        "List the user's address book, sorted by name. `query` is a case-insensitive substring match over name, email addresses, organization, tags and notes; `email` finds the contact owning an exact address (use it to identify the sender of a message). Filters combine with AND. Results are paged: when `has_more` is true, call again with a higher `offset`. An empty result only means no contact matches — it does not mean the person does not exist, so ask the user for the address rather than guessing one.",
+      inputSchema: {
+        query: z.string().max(200).optional(),
+        email: z.string().trim().email().optional(),
+        tag: z.string().max(contactLimits.tag).optional(),
+        limit: z.number().int().min(1).max(200).optional().describe("Default 50"),
+        offset: z.number().int().min(0).optional(),
+      },
+    },
+    async ({ query, email, tag, limit, offset }) => {
+      try {
+        const result = await listContacts(ctx.userId, { query, email, tag, limit, offset });
+        return jsonResult({ contacts: result.contacts, has_more: result.hasMore });
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_contact",
+    {
+      title: "Get a contact",
+      description: "Fetch one address-book entry by its ID (from list_contacts).",
+      inputSchema: {
+        contact_id: z.string().uuid(),
+      },
+    },
+    async ({ contact_id }) => {
+      try {
+        const contact = await requireContact(ctx.userId, contact_id);
+        return jsonResult({ contact });
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "create_contact",
+    {
+      title: "Create a contact",
+      description:
+        "Add a person to the user's address book. Only `name` is required. Each email address can belong to only one contact: if one of the addresses is already stored, nothing is created and the error names the existing contact — call update_contact on that ID instead. Search with list_contacts (`email`) first. Only save details the user gave you or that appear in their mail; do not invent addresses, phone numbers or salutations.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(contactLimits.name).describe("Display name, e.g. \"Anna Schmidt\""),
+        emails: contactEmailsSchema.optional(),
+        phones: contactPhonesSchema.optional(),
+        organization: contactTextSchema(contactLimits.shortText, "Company or organization"),
+        job_title: contactTextSchema(contactLimits.shortText, "Role at the organization"),
+        salutation: contactTextSchema(
+          contactLimits.salutation,
+          "How to open a mail to this person, e.g. \"Hallo Anna\" or \"Sehr geehrter Herr Weber\"",
+        ),
+        notes: contactTextSchema(contactLimits.notes, "Free-text context about the person"),
+        tags: contactTagsSchema.optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const contact = await createContact(ctx.userId, {
+          name: args.name,
+          emails: args.emails,
+          phones: args.phones,
+          organization: args.organization,
+          jobTitle: args.job_title,
+          salutation: args.salutation,
+          notes: args.notes,
+          tags: args.tags,
+        });
+        return jsonResult({ contact });
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_contact",
+    {
+      title: "Update a contact",
+      description:
+        "Change an existing contact. Omitted fields stay as they are; `null` clears a text field. The arrays `emails`, `phones` and `tags` REPLACE the stored list — they are not merged. To add one address, call get_contact first and pass the full list including the existing entries, or the existing ones are lost. An address that already belongs to a different contact is refused. Returns the contact as stored after the change.",
+      inputSchema: {
+        contact_id: z.string().uuid(),
+        name: z.string().trim().min(1).max(contactLimits.name).optional(),
+        emails: contactEmailsSchema.optional(),
+        phones: contactPhonesSchema.optional(),
+        organization: contactTextSchema(contactLimits.shortText, "Company or organization"),
+        job_title: contactTextSchema(contactLimits.shortText, "Role at the organization"),
+        salutation: contactTextSchema(contactLimits.salutation, "How to open a mail to this person"),
+        notes: contactTextSchema(contactLimits.notes, "Free-text context; replaces the existing notes"),
+        tags: contactTagsSchema.optional(),
+      },
+    },
+    async (args) => {
+      try {
+        const contact = await updateContact(ctx.userId, args.contact_id, {
+          name: args.name,
+          emails: args.emails,
+          phones: args.phones,
+          organization: args.organization,
+          jobTitle: args.job_title,
+          salutation: args.salutation,
+          notes: args.notes,
+          tags: args.tags,
+        });
+        if (!contact) throw new Error(`Contact ${args.contact_id} not found for current user`);
+        return jsonResult({ contact });
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "delete_contact",
+    {
+      title: "Delete a contact",
+      description:
+        "Permanently remove a contact from the address book. There is no undo and no trash — only call this when the user explicitly asked for the contact to be deleted. Mail already exchanged with the person is not affected.",
+      inputSchema: {
+        contact_id: z.string().uuid(),
+      },
+    },
+    async ({ contact_id }) => {
+      try {
+        const ok = await deleteContact(ctx.userId, contact_id);
+        if (!ok) throw new Error(`Contact ${contact_id} not found for current user`);
+        return jsonResult({ deleted: true, contact_id });
       } catch (e) {
         return errorResult(e);
       }

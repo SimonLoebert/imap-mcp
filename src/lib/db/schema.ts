@@ -180,6 +180,35 @@ export const calendarAccounts = pgTable(
   (t) => [index("calendar_accounts_user_id_idx").on(t.userId)],
 );
 
+/**
+ * Address book: the people the user writes to regularly. Readable and
+ * editable both from the web UI and over MCP, so a client can resolve "mail
+ * Anna" to an address and keep the entry up to date. Addresses are stored
+ * trimmed and lower-cased (see src/lib/contacts.ts), which is what makes the
+ * per-user duplicate check a plain array overlap.
+ */
+export const contacts = pgTable(
+  "contacts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    emails: text("emails").array().notNull().default([]),
+    phones: text("phones").array().notNull().default([]),
+    organization: text("organization"),
+    jobTitle: text("job_title"),
+    /** How to greet this person in a mail, e.g. "Hallo Anna" or "Sehr geehrter Herr Weber". */
+    salutation: text("salutation"),
+    notes: text("notes"),
+    tags: text("tags").array().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index("contacts_user_id_idx").on(t.userId)],
+);
+
 export type User = typeof users.$inferSelect;
 export type PendingMessage = typeof pendingMessages.$inferSelect;
 export type NewPendingMessage = typeof pendingMessages.$inferInsert;
@@ -187,6 +216,8 @@ export type MailAccount = typeof mailAccounts.$inferSelect;
 export type NewMailAccount = typeof mailAccounts.$inferInsert;
 export type CalendarAccount = typeof calendarAccounts.$inferSelect;
 export type NewCalendarAccount = typeof calendarAccounts.$inferInsert;
+export type Contact = typeof contacts.$inferSelect;
+export type NewContact = typeof contacts.$inferInsert;
 export type OAuthClient = typeof oauthClients.$inferSelect;
 export type OAuthAuthCode = typeof oauthAuthCodes.$inferSelect;
 export type OAuthToken = typeof oauthTokens.$inferSelect;

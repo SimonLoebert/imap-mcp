@@ -32,9 +32,10 @@ One container, one domain, your server, your keys.
 - 🔑 **OAuth 2.1** (Authorization Code + PKCE) with **Dynamic Client Registration** (RFC 7591)
 - 📬 Unlimited IMAP/SMTP accounts per user, each with its own **HTML signature** (Tiptap editor, DOMPurify-sanitized)
 - 🗓️ Unlimited **CalDAV calendar accounts** per user — list/read/create/update/delete events and find free slots, fully timezone-aware (TZID + DST-correct recurrences)
+- 📇 **Address book** for the people you write to regularly — names, addresses, phones, salutation and notes, readable *and* editable by Claude over MCP
 - ✋ **Human-in-the-loop approvals** — outgoing mail is parked in an approval queue and only reaches SMTP after you release it in the web UI (per-account, on by default)
 - 🔒 Credentials encrypted with **AES-256-GCM**; OAuth tokens stored as **SHA-256** hashes only
-- 🧰 **30 MCP tools**: 22 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`)
+- 🧰 **35 MCP tools**: 22 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`) + 5 contact tools (`list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`)
 - 🧪 **Test connection from the list** (IMAP `NOOP` + SMTP `VERIFY`, CalDAV principal-discovery) with per-account status badges and actionable error hints
 - ⚡ **Provider presets** on account creation: Gmail, Outlook / Microsoft 365, iCloud, Yahoo, Fastmail, OVH for email — iCloud, Fastmail, Nextcloud, OVH, Baïkal/generic for calendars
 - ⚠️ **Live port/SSL consistency warnings** — catches the `wrong version number` trap before it happens
@@ -139,6 +140,19 @@ your real values and (re)start the container. No local build or GitHub repositor
 2. Pick a preset (iCloud, Fastmail, Nextcloud, OVH, Baïkal/generic) to fill the CalDAV base URL — `tsdav` auto-discovers the principal and home calendars from there.
 3. Use a provider **app password** (Apple, Fastmail, Nextcloud all expose one). Google Calendar **is not supported in v1** because Google requires OAuth 2.0 for CalDAV — see *Out of scope* below.
 4. Save, then click **Test connection**: the badge shows the number of calendars discovered.
+
+### 3b′. Keep an address book (optional)
+
+**`/contacts`** holds the people you mail regularly: name, one or more email addresses
+(primary first), phone numbers, organization, job title, a **salutation** (how Claude
+should open a mail to them — `Hallo Anna`, `Sehr geehrter Herr Weber`), tags and free-text
+notes. Claude sees the same entries over MCP and can add or edit them, so "mail Anna about
+Friday" resolves to the stored address instead of a guess.
+
+An address belongs to at most one contact per user; creating a second contact with the
+same address is refused (409 in the UI, an error naming the existing contact over MCP).
+Addresses and tags are stored lower-cased. Saving a contact never sends anything, and mail
+to a contact still goes through the approval gate below.
 
 ### 3c. Approve outgoing mail
 
@@ -332,6 +346,16 @@ without `--force` first to see what it plans.
 | `delete_event`           | Delete an event by URL. Pass `etag` for safe optimistic deletion.       |
 | `find_free_slots`        | Find free intervals across one or more calendars, with optional working-hours filter (DST-correct in the working-hours tz). |
 
+### Contacts (address book)
+
+| Tool             | Purpose                                                                 |
+| ---------------- | ----------------------------------------------------------------------- |
+| `list_contacts`  | List the address book sorted by name; `query` (substring over name, addresses, organization, tags, notes), exact `email` lookup, `tag` filter, paged with `limit`/`offset` |
+| `get_contact`    | One contact by ID                                                       |
+| `create_contact` | Add a contact. Refused if one of its addresses already belongs to another contact — the error names that contact |
+| `update_contact` | Patch a contact. Omitted fields stay, `null` clears a text field, `emails`/`phones`/`tags` replace the stored list |
+| `delete_contact` | Permanently delete a contact                                            |
+
 The authenticated user's ID is always injected from the OAuth token — tools never accept it as an argument, so a client cannot impersonate another user.
 
 ### Timezones (calendar)
@@ -377,6 +401,8 @@ pending_messages(id, user_id, account_id, kind, status,
 calendar_accounts(id, user_id, label,
                   caldav_url, username, password_enc,
                   default_calendar_url, color, is_default)
+contacts(id, user_id, name, emails[], phones[], organization, job_title,
+         salutation, notes, tags[], created_at, updated_at)
 oauth_clients(id, client_secret_hash, redirect_uris[], token_endpoint_auth_method)
 oauth_auth_codes(code, client_id, user_id, redirect_uri,
                  code_challenge, code_challenge_method, expires_at, consumed_at)
