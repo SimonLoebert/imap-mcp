@@ -35,8 +35,9 @@ One container, one domain, your server, your keys.
 - 📇 **Address book** for the people you write to regularly — names, addresses, phones, salutation and notes, readable *and* editable by Claude over MCP
 - 🚦 **Inbox status** — every received message is *new*, *unhandled*, *handled* or *on hold until a date*, so Claude keeps track of what you have been told and what still needs an answer across sessions; a dashboard at `/status` shows the same
 - ✋ **Human-in-the-loop approvals** — outgoing mail is parked in an approval queue and only reaches SMTP after you release it in the web UI (per-account, on by default)
+- ✍️ **PGP-signed mail by default** — every account gets its own OpenPGP key; outgoing mail is signed as PGP/MIME (RFC 3156) and carries the public key, and you can import your own key instead
 - 🔒 Credentials encrypted with **AES-256-GCM**; OAuth tokens stored as **SHA-256** hashes only
-- 🧰 **38 MCP tools**: 25 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals + message status) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`) + 5 contact tools (`list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`)
+- 🧰 **39 MCP tools**: 26 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals + message status + `get_pgp_public_key`) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`) + 5 contact tools (`list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`)
 - 🧪 **Test connection from the list** (IMAP `NOOP` + SMTP `VERIFY`, CalDAV principal-discovery) with per-account status badges and actionable error hints
 - ⚡ **Provider presets** on account creation: Gmail, Outlook / Microsoft 365, iCloud, Yahoo, Fastmail, OVH for email — iCloud, Fastmail, Nextcloud, OVH, Baïkal/generic for calendars
 - ⚠️ **Live port/SSL consistency warnings** — catches the `wrong version number` trap before it happens
@@ -212,6 +213,25 @@ back; it cannot change the list.
 Turn the requirement off per account in the account form if you want a specific mailbox to
 send without asking — the warning shown there is worth reading first.
 
+### 3d. PGP signing
+
+Every outgoing message — sent directly or after your approval — is **signed as PGP/MIME**
+(RFC 3156, `multipart/signed`) with the account's own OpenPGP key, and the public key rides
+along as `OpenPGP_0x….asc` so recipients can verify it and import your key in one click.
+Signing proves the mail came from you and was not altered; it does **not** encrypt it.
+
+- A new account gets an Ed25519 key for its address when it is created. Accounts that
+  existed before this feature get one on their first signed send.
+- In the account form (*PGP signing*) you can download the public key, generate a new key,
+  or **import your own** armored private key. A passphrase-protected key is unlocked once on
+  import and stored encrypted with `MCP_MASTER_KEY`, like the IMAP/SMTP passwords — the
+  passphrase itself is not kept, so anyone who controls the server can sign as you.
+- Two switches per account, both on by default: *Sign outgoing mail by default* and
+  *Attach my public key*. An MCP client can override them per message with `pgp_sign` /
+  `attach_public_key` on `send_message` and `reply_message`; the approval queue shows
+  what will happen, and the send result reports it under `pgp`.
+- The Sent-folder copy is byte-for-byte the signed message.
+
 ### 4. Connect your MCP client
 
 Every signed-in user has a built-in guide at **`/connect`** with tabbed setup instructions
@@ -327,6 +347,10 @@ without `--force` first to see what it plans.
 | ----------------- | ----------------------------------------------------------------------- |
 | `send_message`    | Send via the account's SMTP, appending the HTML signature and base64 attachments; the sent copy is IMAP-appended to the Sent folder (skipped on Gmail, which saves it automatically). Queued for approval instead of sent when the account requires it. |
 | `reply_message`   | Reply preserving `In-Reply-To` / `References`; same Sent-folder and approval behavior as `send_message`. |
+| `get_pgp_public_key` | Return the account's armored OpenPGP public key, fingerprint and user IDs (generates a key if the account has none). Never returns the private key. |
+
+Both send tools PGP/MIME-sign the message and attach the public key unless the account's
+defaults or `pgp_sign: false` / `attach_public_key: false` say otherwise.
 
 ### Approvals (human-in-the-loop)
 
@@ -427,7 +451,9 @@ mail_accounts(id, user_id, label, email,
               imap_{host,port,secure,user,password_enc},
               smtp_{host,port,secure,user,password_enc},
               signature_html, writing_style,
-              require_send_approval, approval_allowlist[], is_default,
+              require_send_approval, approval_allowlist[],
+              pgp_private_key_enc, pgp_public_key, pgp_fingerprint,
+              pgp_sign_by_default, pgp_attach_public_key, is_default,
               status_tracking_since)
 pending_messages(id, user_id, account_id, kind, status,
                  subject, to_addresses[], cc_addresses[], bcc_addresses[],
@@ -460,6 +486,7 @@ before this feature have no `addedBy` and are read as `"client"` — no migratio
 
 - Master key: AES-256-GCM, IV per ciphertext, authenticated. Ciphertext = `base64(iv(12) ‖ ct ‖ tag(16))`.
 - Passwords are never returned from the REST API — only their encrypted blob is stored.
+- PGP private keys are stored unlocked but encrypted with the master key (`pgp_private_key_enc`), never returned by the REST API or over MCP, and can only be replaced from the Clerk-authenticated account page. Signing runs in the same single send path as the approval gate, so a queued message is signed when it is approved, with the key the account has at that moment.
 - Access tokens are **opaque** random strings; DB stores only their SHA-256.
 - Refresh tokens rotate on every use (old one is revoked).
 - Signatures pass through DOMPurify server-side before storage *and* before being injected into outgoing mail.

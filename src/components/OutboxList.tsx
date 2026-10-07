@@ -91,6 +91,15 @@ function MessageBody({ message }: { message: PendingMessageSummary }) {
           The account signature is appended on send and is not part of this preview.
         </p>
       )}
+      {(message.pgpSign || message.attachPublicKey) && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          {message.pgpSign && message.attachPublicKey
+            ? "Signed with the account's PGP key; the public key is attached."
+            : message.pgpSign
+              ? "Signed with the account's PGP key."
+              : "The account's PGP public key is attached (message not signed)."}
+        </p>
+      )}
     </div>
   );
 }

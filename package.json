@@ -26,6 +26,7 @@
     "mailparser": "^3.7.2",
     "next": "^15.2.3",
     "nodemailer": "^6.9.16",
+    "openpgp": "^6.3.2",
     "pg": "^8.13.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

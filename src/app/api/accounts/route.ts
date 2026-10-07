@@ -6,6 +6,7 @@ import { getCurrentUserRowId } from "@/lib/auth/clerk";
 import { encrypt } from "@/lib/crypto";
 import { sanitizeSignatureHtml } from "@/lib/smtp";
 import { accountCreateSchema } from "@/lib/validation/account";
+import { generatePgpKey } from "@/lib/pgp";
 
 export async function GET() {
   const userId = await getCurrentUserRowId();
@@ -27,6 +28,9 @@ export async function GET() {
       writingStyle: mailAccounts.writingStyle,
       requireSendApproval: mailAccounts.requireSendApproval,
       approvalAllowlist: mailAccounts.approvalAllowlist,
+      pgpFingerprint: mailAccounts.pgpFingerprint,
+      pgpSignByDefault: mailAccounts.pgpSignByDefault,
+      pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
       isDefault: mailAccounts.isDefault,
       createdAt: mailAccounts.createdAt,
     })
@@ -60,6 +64,15 @@ export async function POST(req: Request) {
     }
   }
 
+  const pgpSignByDefault = input.pgpSignByDefault ?? true;
+  const pgpAttachPublicKey = input.pgpAttachPublicKey ?? true;
+  // Give the account its signing identity right away, so the owner can see
+  // and publish the fingerprint before the first mail goes out.
+  const pgpKey =
+    pgpSignByDefault || pgpAttachPublicKey
+      ? await generatePgpKey(input.email, input.fromName)
+      : null;
+
   const [created] = await db
     .insert(mailAccounts)
     .values({
@@ -82,6 +95,11 @@ export async function POST(req: Request) {
       // Human-in-the-loop is on unless the account owner opts out.
       requireSendApproval: input.requireSendApproval ?? true,
       approvalAllowlist: input.approvalAllowlist ?? [],
+      pgpSignByDefault,
+      pgpAttachPublicKey,
+      pgpPrivateKeyEnc: pgpKey?.privateKeyEnc ?? null,
+      pgpPublicKey: pgpKey?.publicKey ?? null,
+      pgpFingerprint: pgpKey?.fingerprint ?? null,
       isDefault: input.isDefault ?? false,
     })
     .returning({ id: mailAccounts.id });

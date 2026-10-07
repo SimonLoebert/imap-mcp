@@ -62,6 +62,19 @@ export const mailAccounts = pgTable(
      * of a message is covered.
      */
     approvalAllowlist: text("approval_allowlist").array().notNull().default([]),
+    /**
+     * OpenPGP identity of the account (see src/lib/pgp.ts). The private key is
+     * stored unlocked (no passphrase) as armored text, encrypted with the
+     * master key like the passwords. Generated on first use when signing is on
+     * and no key was imported.
+     */
+    pgpPrivateKeyEnc: text("pgp_private_key_enc"),
+    pgpPublicKey: text("pgp_public_key"),
+    pgpFingerprint: text("pgp_fingerprint"),
+    /** Sign outgoing mail as PGP/MIME (RFC 3156) unless a send asks otherwise. */
+    pgpSignByDefault: boolean("pgp_sign_by_default").notNull().default(true),
+    /** Attach the public key (`OpenPGP_0x….asc`) to outgoing mail. */
+    pgpAttachPublicKey: boolean("pgp_attach_public_key").notNull().default(true),
     isDefault: boolean("is_default").notNull().default(false),
     /**
      * Messages that arrived before this instant and carry no stored status

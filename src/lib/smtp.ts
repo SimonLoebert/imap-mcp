@@ -4,6 +4,12 @@ import DOMPurify from "isomorphic-dompurify";
 import { decrypt } from "@/lib/crypto";
 import type { MailAccount } from "@/lib/db/schema";
 import { saveToSentFolder, type AccountLike } from "@/lib/imap";
+import {
+  ensureAccountPgpKey,
+  publicKeyFilename,
+  signMimeMessage,
+  type PgpAccountLike,
+} from "@/lib/pgp";
 
 export type SmtpAccountLike = Pick<
   MailAccount,
@@ -15,8 +21,11 @@ export type SmtpAccountLike = Pick<
   | "email"
   | "fromName"
   | "signatureHtml"
+  | "pgpSignByDefault"
+  | "pgpAttachPublicKey"
 > &
-  AccountLike;
+  AccountLike &
+  PgpAccountLike;
 
 /**
  * Providers whose SMTP transparently writes the message to the user's Sent
@@ -81,6 +90,10 @@ export interface SendMailInput {
    * Gmail (which saves to Sent through its SMTP on its own).
    */
   saveToSent?: boolean;
+  /** Sign as PGP/MIME. Falls back to the account's `pgpSignByDefault`. */
+  pgpSign?: boolean;
+  /** Attach the account's public key. Falls back to `pgpAttachPublicKey`. */
+  attachPublicKey?: boolean;
 }
 
 export interface SendMailResult {
@@ -93,6 +106,11 @@ export interface SendMailResult {
     folder?: string | null;
     error?: string;
     skippedReason?: string;
+  };
+  pgp: {
+    signed: boolean;
+    publicKeyAttached: boolean;
+    fingerprint: string | null;
   };
 }
 
@@ -159,6 +177,27 @@ export async function sendMail(
   const transport = buildTransport(acc);
   try {
     const { text, html } = appendSignature(acc, input);
+    const pgpSign = input.pgpSign ?? acc.pgpSignByDefault;
+    const attachPublicKey = input.attachPublicKey ?? acc.pgpAttachPublicKey;
+    const pgpKey = pgpSign || attachPublicKey ? await ensureAccountPgpKey(acc) : null;
+
+    const attachments: NonNullable<nodemailer.SendMailOptions["attachments"]> =
+      input.attachments?.map((a) => ({
+        filename: a.filename,
+        content: Buffer.from(a.contentBase64, "base64"),
+        contentType: a.contentType,
+        cid: a.contentId,
+        contentDisposition: a.isInline ? ("inline" as const) : ("attachment" as const),
+      })) ?? [];
+    if (pgpKey && attachPublicKey) {
+      attachments.push({
+        filename: publicKeyFilename(pgpKey.fingerprint),
+        content: pgpKey.publicKey,
+        contentType: "application/pgp-keys",
+        contentDisposition: "attachment",
+      });
+    }
+
     const mailOptions: nodemailer.SendMailOptions = {
       from: buildFromAddress(acc),
       to: input.to.join(", "),
@@ -169,20 +208,21 @@ export async function sendMail(
       html,
       inReplyTo: input.inReplyTo,
       references: input.references?.join(" "),
-      attachments: input.attachments?.map((a) => ({
-        filename: a.filename,
-        content: Buffer.from(a.contentBase64, "base64"),
-        contentType: a.contentType,
-        cid: a.contentId,
-        contentDisposition: a.isInline ? "inline" : "attachment",
-      })),
+      attachments: attachments.length ? attachments : undefined,
+      // A signature covers the exact bytes, so keep the signed part 7-bit:
+      // quoted-printable also protects trailing whitespace and long lines
+      // from being rewritten by relays on the way.
+      textEncoding: pgpSign ? "quoted-printable" : undefined,
     };
 
     // Compose the raw MIME once so we can both feed it to SMTP and APPEND
     // the exact same bytes to IMAP — guarantees the Sent copy matches what
     // the recipient got on the wire (same Message-ID, same Date, same
     // multipart boundaries).
-    const { raw, envelope, messageId } = await buildRawMime(mailOptions);
+    const composed = await buildRawMime(mailOptions);
+    const { envelope, messageId } = composed;
+    const raw =
+      pgpSign && pgpKey ? await signMimeMessage(composed.raw, pgpKey.privateKeyEnc) : composed.raw;
 
     const info = await transport.sendMail({ envelope, raw, messageId });
 
@@ -224,6 +264,11 @@ export async function sendMail(
       accepted: (info.accepted as string[]) ?? [],
       rejected: (info.rejected as string[]) ?? [],
       savedToSent,
+      pgp: {
+        signed: Boolean(pgpSign && pgpKey),
+        publicKeyAttached: Boolean(attachPublicKey && pgpKey),
+        fingerprint: pgpKey?.fingerprint ?? null,
+      },
     };
   } finally {
     transport.close();

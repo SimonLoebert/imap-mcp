@@ -59,6 +59,9 @@ export interface PendingMessagePayload {
   references?: string[];
   includeSignature?: boolean;
   attachments?: PendingAttachment[];
+  /** Per-message PGP overrides; absent means "use the account's setting at send time". */
+  pgpSign?: boolean;
+  attachPublicKey?: boolean;
 }
 
 /** Attachment metadata without the base64 blob. */
@@ -95,6 +98,10 @@ export interface PendingMessageSummary {
   bodyText: string | null;
   bodyHtml: string | null;
   includeSignature: boolean;
+  /** Whether the message will be (or was) PGP-signed, resolved against the account default. */
+  pgpSign: boolean;
+  /** Whether the account's public key will be (or was) attached. */
+  attachPublicKey: boolean;
   attachments: PendingAttachmentSummary[];
   replyTo: { folder: string; uid: number } | null;
   requestedByClientId: string | null;

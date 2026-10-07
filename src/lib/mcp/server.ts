@@ -25,6 +25,7 @@ import {
 } from "@/lib/imap";
 import type { OutgoingAttachment, SendMailInput } from "@/lib/smtp";
 import { sendMail } from "@/lib/smtp";
+import { describePublicKey, ensureAccountPgpKey, publicKeyFilename } from "@/lib/pgp";
 import {
   approvalTtlHours,
   cancelPending,
@@ -126,6 +127,19 @@ const attachmentSchema = z.object({
     .optional()
     .describe("If true, attach with Content-Disposition: inline (use with content_id)."),
 });
+
+const pgpSignSchema = z
+  .boolean()
+  .optional()
+  .describe(
+    "Sign this message as PGP/MIME with the account's key. Omit to use the account default (`pgp.signByDefault` in list_accounts, normally true). Set false only when the user asks for an unsigned mail, e.g. for a mailing list that mangles signatures.",
+  );
+const attachPublicKeySchema = z
+  .boolean()
+  .optional()
+  .describe(
+    "Attach the account's PGP public key (OpenPGP_0x….asc). Omit to use the account default (`pgp.attachPublicKey`, normally true).",
+  );
 
 function toOutgoing(list: z.infer<typeof attachmentSchema>[] | undefined): OutgoingAttachment[] | undefined {
   if (!list?.length) return undefined;
@@ -253,7 +267,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       capabilities: { tools: {} },
       instructions:
-        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. Exception: when EVERY recipient (To, Cc and Bcc) is on the account's `approvalAllowlist` (full addresses or `@domain` entries, exact domain match only), the message is sent immediately and the response says status=\"sent\". One recipient outside the list sends the whole message to approval. Always read `status` in the response instead of predicting it. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nMESSAGE STATUS — Every received message has a processing `status` that you maintain across sessions: \"new\" (the user has not been told about it yet — tell them), \"unhandled\" (the user knows, a reply is still owed), \"handled\" (answered or nothing to do) or \"hold\" (parked until `holdUntil`: answer later, or check then whether the other side replied). list_messages, search_messages, get_message and get_thread return `status`, `holdUntil`, `holdDue` and `statusNote` on every message. Start a triage run with list_actionable_messages: it returns new messages, unhandled ones and holds whose date has come. After informing the user about a new message, set it to \"unhandled\" with set_message_status; after a reply went out (status=\"sent\", not pending_approval) decide yourself whether it is \"handled\" or \"hold\" (to check back for an answer) — the status never changes on its own, sending or replying does not set it. When a new message carries `threadHold`, it answers a message on hold: tell the user that the awaited reply arrived and close or re-date that hold. Messages that arrived before status tracking was enabled count as \"handled\".\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.\n\nCONTACTS — The user keeps an address book of the people they write to regularly. When the user names a recipient (\"mail Anna\"), look the person up with list_contacts and use the stored address instead of guessing one; if several contacts match, ask which one. A contact's `salutation` says how to greet them and overrides the writing style's default greeting for that recipient; `notes` carry context the user wants you to know. Before create_contact, search by address first — an address can belong to only one contact, so a duplicate is refused with the existing contact's id. Contacts are independent of the mail accounts: saving a contact never sends anything, and a contact's address still goes through the normal approval gate.",
+        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. Exception: when EVERY recipient (To, Cc and Bcc) is on the account's `approvalAllowlist` (full addresses or `@domain` entries, exact domain match only), the message is sent immediately and the response says status=\"sent\". One recipient outside the list sends the whole message to approval. Always read `status` in the response instead of predicting it. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nPGP — Outgoing mail is PGP/MIME-signed with the account's own key and carries its public key as an attachment unless the account (`pgp` in list_accounts) or the send call (pgp_sign / attach_public_key) says otherwise. Signing is not encryption: never tell the user a message was sent encrypted. The `pgp` object in a send result says what actually happened.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nMESSAGE STATUS — Every received message has a processing `status` that you maintain across sessions: \"new\" (the user has not been told about it yet — tell them), \"unhandled\" (the user knows, a reply is still owed), \"handled\" (answered or nothing to do) or \"hold\" (parked until `holdUntil`: answer later, or check then whether the other side replied). list_messages, search_messages, get_message and get_thread return `status`, `holdUntil`, `holdDue` and `statusNote` on every message. Start a triage run with list_actionable_messages: it returns new messages, unhandled ones and holds whose date has come. After informing the user about a new message, set it to \"unhandled\" with set_message_status; after a reply went out (status=\"sent\", not pending_approval) decide yourself whether it is \"handled\" or \"hold\" (to check back for an answer) — the status never changes on its own, sending or replying does not set it. When a new message carries `threadHold`, it answers a message on hold: tell the user that the awaited reply arrived and close or re-date that hold. Messages that arrived before status tracking was enabled count as \"handled\".\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.\n\nCONTACTS — The user keeps an address book of the people they write to regularly. When the user names a recipient (\"mail Anna\"), look the person up with list_contacts and use the stored address instead of guessing one; if several contacts match, ask which one. A contact's `salutation` says how to greet them and overrides the writing style's default greeting for that recipient; `notes` carry context the user wants you to know. Before create_contact, search by address first — an address can belong to only one contact, so a duplicate is refused with the existing contact's id. Contacts are independent of the mail accounts: saving a contact never sends anything, and a contact's address still goes through the normal approval gate.",
     },
   );
 
@@ -262,13 +276,41 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "List email accounts",
       description:
-        "List the IMAP/SMTP email accounts configured by the current user. `requireSendApproval` says whether sends are held for the owner's approval; `approvalAllowlist` lists the addresses and `@domain`s that skip that approval — only when every recipient of a message is on it. Only the owner can change either, in the web UI.",
+        "List the IMAP/SMTP email accounts configured by the current user. `requireSendApproval` says whether sends are held for the owner's approval; `approvalAllowlist` lists the addresses and `@domain`s that skip that approval — only when every recipient of a message is on it. Only the owner can change either, in the web UI. `pgp` carries the account's OpenPGP key fingerprint (null until a key exists — one is generated on the first signed send) and whether outgoing mail is signed (`signByDefault`) and carries the public key (`attachPublicKey`) by default.",
       inputSchema: {},
     },
     async () => {
       try {
         const rows = await listUserAccounts(ctx.userId);
         return jsonResult({ accounts: rows });
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "get_pgp_public_key",
+    {
+      title: "Get the account's PGP public key",
+      description:
+        "Return the armored OpenPGP public key the account signs outgoing mail with, plus its fingerprint and user IDs — use it when the user wants to share or publish their key. Generates and stores a key if the account has none yet. The private key is never returned, and there is no tool to replace or import keys: that is done by the owner in the web UI.",
+      inputSchema: {
+        account_id: z.string().uuid().describe("Account ID returned by list_accounts"),
+      },
+    },
+    async ({ account_id }) => {
+      try {
+        const acc = await requireAccount(ctx.userId, account_id);
+        const key = await ensureAccountPgpKey(acc);
+        return jsonResult({
+          account: { id: acc.id, label: acc.label, email: acc.email },
+          ...(await describePublicKey(key.publicKey)),
+          filename: publicKeyFilename(key.fingerprint),
+          signByDefault: acc.pgpSignByDefault,
+          attachPublicKey: acc.pgpAttachPublicKey,
+          publicKey: key.publicKey,
+        });
       } catch (e) {
         return errorResult(e);
       }
@@ -408,7 +450,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Send email",
       description:
-        "Send an email through the account's SMTP. Before drafting, call list_accounts and follow the chosen account's `writingStyleInstructions` verbatim — it encodes language, tone, greetings, length and any custom rules the user configured. The HTML signature is appended when include_signature=true. File attachments are accepted as base64. A copy of the sent message is IMAP-appended to the Sent folder for every provider except Gmail (which already saves to Sent through SMTP).\n\nHUMAN-IN-THE-LOOP — when the account has `requireSendApproval` (see list_accounts), NOTHING is sent here: the draft is parked in the owner's outbox and the response comes back with status=\"pending_approval\" plus a `pending_id` and an `approval_url`. Hand that URL to the user, state plainly that the mail has NOT gone out yet, and check get_pending_message for the outcome. The owner can also attach further files to the draft on that page before approving it, so don't ask the user to re-queue a message just to add an attachment. Exception: if every To/Cc/Bcc recipient is covered by the account's `approvalAllowlist` (see list_accounts), the message is sent immediately with status=\"sent\"; a single recipient outside it queues the whole message. `request_approval: true` always queues. Never claim a message was sent unless the response says status=\"sent\".",
+        "Send an email through the account's SMTP. Before drafting, call list_accounts and follow the chosen account's `writingStyleInstructions` verbatim — it encodes language, tone, greetings, length and any custom rules the user configured. The HTML signature is appended when include_signature=true. File attachments are accepted as base64. By default the message is PGP/MIME-signed with the account's key and the public key is attached (see `pgp` in list_accounts; override per message with pgp_sign / attach_public_key) — the signature proves origin and integrity only, the message is NOT encrypted. A copy of the sent message is IMAP-appended to the Sent folder for every provider except Gmail (which already saves to Sent through SMTP).\n\nHUMAN-IN-THE-LOOP — when the account has `requireSendApproval` (see list_accounts), NOTHING is sent here: the draft is parked in the owner's outbox and the response comes back with status=\"pending_approval\" plus a `pending_id` and an `approval_url`. Hand that URL to the user, state plainly that the mail has NOT gone out yet, and check get_pending_message for the outcome. The owner can also attach further files to the draft on that page before approving it, so don't ask the user to re-queue a message just to add an attachment. Exception: if every To/Cc/Bcc recipient is covered by the account's `approvalAllowlist` (see list_accounts), the message is sent immediately with status=\"sent\"; a single recipient outside it queues the whole message. `request_approval: true` always queues. Never claim a message was sent unless the response says status=\"sent\".",
       inputSchema: {
         account_id: z.string().uuid(),
         to: z.array(z.string().email()).min(1),
@@ -419,6 +461,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
         body_html: z.string().optional(),
         include_signature: z.boolean().default(true),
         attachments: z.array(attachmentSchema).optional(),
+        pgp_sign: pgpSignSchema,
+        attach_public_key: attachPublicKeySchema,
         request_approval: z
           .boolean()
           .optional()
@@ -446,6 +490,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
             html: args.body_html,
             includeSignature: args.include_signature,
             attachments: toOutgoing(args.attachments),
+            pgpSign: args.pgp_sign,
+            attachPublicKey: args.attach_public_key,
           },
           { requestApproval: args.request_approval },
         );
@@ -460,7 +506,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Reply to message",
       description:
-        "Reply to an existing message (preserves In-Reply-To and References, quotes the original when quote_original=true). Follow the account's `writingStyleInstructions` from list_accounts when drafting the body. The reply is IMAP-appended to Sent (skipped on Gmail).\n\nHUMAN-IN-THE-LOOP — same approval gate as send_message: when the account has `requireSendApproval`, the reply is only queued (status=\"pending_approval\") and the owner must approve it at `approval_url` before it leaves the server — unless every recipient is on the account's `approvalAllowlist`, in which case it is sent at once (status=\"sent\"). With reply_all, Cc recipients count too.",
+        "Reply to an existing message (preserves In-Reply-To and References, quotes the original when quote_original=true). Follow the account's `writingStyleInstructions` from list_accounts when drafting the body. The reply is IMAP-appended to Sent (skipped on Gmail).\n\nHUMAN-IN-THE-LOOP — same approval gate as send_message: when the account has `requireSendApproval`, the reply is only queued (status=\"pending_approval\") and the owner must approve it at `approval_url` before it leaves the server — unless every recipient is on the account's `approvalAllowlist`, in which case it is sent at once (status=\"sent\"). With reply_all, Cc recipients count too.\n\nPGP — like send_message, the reply is signed and carries the public key unless the account default or pgp_sign / attach_public_key say otherwise. It is never encrypted.",
       inputSchema: {
         account_id: z.string().uuid(),
         folder: z.string(),
@@ -471,6 +517,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
         quote_original: z.boolean().default(true),
         reply_all: z.boolean().default(false),
         attachments: z.array(attachmentSchema).optional(),
+        pgp_sign: pgpSignSchema,
+        attach_public_key: attachPublicKeySchema,
         request_approval: z
           .boolean()
           .optional()
@@ -532,6 +580,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
             inReplyTo: original.messageId ?? undefined,
             references: refs.filter(Boolean),
             attachments: toOutgoing(args.attachments),
+            pgpSign: args.pgp_sign,
+            attachPublicKey: args.attach_public_key,
           },
           {
             requestApproval: args.request_approval,

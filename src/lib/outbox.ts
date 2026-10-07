@@ -79,10 +79,14 @@ export function sanitizeAttachmentFilename(raw: string): string {
 
 type Row = typeof pendingMessages.$inferSelect;
 
-function summarize(
-  row: Row,
-  account: { label: string; email: string },
-): PendingMessageSummary {
+type SummaryAccount = {
+  label: string;
+  email: string;
+  pgpSignByDefault?: boolean;
+  pgpAttachPublicKey?: boolean;
+};
+
+function summarize(row: Row, account: SummaryAccount): PendingMessageSummary {
   const payload = row.payload;
   return {
     id: row.id,
@@ -98,6 +102,8 @@ function summarize(
     bodyText: payload.text ?? null,
     bodyHtml: payload.html ? sanitizeBodyHtml(payload.html) : null,
     includeSignature: payload.includeSignature ?? false,
+    pgpSign: payload.pgpSign ?? account.pgpSignByDefault ?? false,
+    attachPublicKey: payload.attachPublicKey ?? account.pgpAttachPublicKey ?? false,
     attachments: attachmentSummaries(payload),
     replyTo:
       row.replyFolder && row.replyUid !== null
@@ -153,6 +159,8 @@ export async function queueForApproval(input: QueueInput): Promise<PendingMessag
     inReplyTo: input.mail.inReplyTo,
     references: input.mail.references,
     includeSignature: input.mail.includeSignature,
+    pgpSign: input.mail.pgpSign,
+    attachPublicKey: input.mail.attachPublicKey,
     attachments: input.mail.attachments?.map((a) => ({
       filename: sanitizeAttachmentFilename(a.filename),
       contentBase64: a.contentBase64,
@@ -195,7 +203,7 @@ export async function queueForApproval(input: QueueInput): Promise<PendingMessag
     })
     .returning();
 
-  return summarize(row, { label: input.account.label, email: input.account.email });
+  return summarize(row, input.account);
 }
 
 export interface ListOptions {
@@ -381,7 +389,12 @@ export async function retryFailed(userId: string, id: string): Promise<PendingMe
     );
   }
   const [account] = await db
-    .select({ label: mailAccounts.label, email: mailAccounts.email })
+    .select({
+      label: mailAccounts.label,
+      email: mailAccounts.email,
+      pgpSignByDefault: mailAccounts.pgpSignByDefault,
+      pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+    })
     .from(mailAccounts)
     .where(eq(mailAccounts.id, row.accountId))
     .limit(1);
@@ -409,7 +422,12 @@ async function decide(
   if (!row) throw await notPendingError(userId, id);
 
   const [account] = await db
-    .select({ label: mailAccounts.label, email: mailAccounts.email })
+    .select({
+      label: mailAccounts.label,
+      email: mailAccounts.email,
+      pgpSignByDefault: mailAccounts.pgpSignByDefault,
+      pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+    })
     .from(mailAccounts)
     .where(eq(mailAccounts.id, row.accountId))
     .limit(1);
@@ -567,7 +585,12 @@ export async function removeAttachment(
 
 async function withAccount(row: Row): Promise<PendingMessageSummary> {
   const [account] = await db
-    .select({ label: mailAccounts.label, email: mailAccounts.email })
+    .select({
+      label: mailAccounts.label,
+      email: mailAccounts.email,
+      pgpSignByDefault: mailAccounts.pgpSignByDefault,
+      pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
+    })
     .from(mailAccounts)
     .where(eq(mailAccounts.id, row.accountId))
     .limit(1);

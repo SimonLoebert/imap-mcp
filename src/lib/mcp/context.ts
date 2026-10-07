@@ -28,16 +28,24 @@ export async function listUserAccounts(userId: string) {
       writingStyle: mailAccounts.writingStyle,
       requireSendApproval: mailAccounts.requireSendApproval,
       approvalAllowlist: mailAccounts.approvalAllowlist,
+      pgpFingerprint: mailAccounts.pgpFingerprint,
+      pgpSignByDefault: mailAccounts.pgpSignByDefault,
+      pgpAttachPublicKey: mailAccounts.pgpAttachPublicKey,
       isDefault: mailAccounts.isDefault,
     })
     .from(mailAccounts)
     .where(eq(mailAccounts.userId, userId))
     .orderBy(mailAccounts.createdAt);
 
-  return rows.map((r) => {
+  return rows.map(({ pgpFingerprint, pgpSignByDefault, pgpAttachPublicKey, ...r }) => {
     const style: WritingStyle | null = r.writingStyle ?? null;
     return {
       ...r,
+      pgp: {
+        fingerprint: pgpFingerprint,
+        signByDefault: pgpSignByDefault,
+        attachPublicKey: pgpAttachPublicKey,
+      },
       writingStyle: isEmptyStyle(style) ? null : style,
       writingStyleInstructions: isEmptyStyle(style)
         ? null
