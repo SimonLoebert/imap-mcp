@@ -37,12 +37,14 @@ src/lib/imap.ts              All IMAP work (imapflow), folder/message/attachment
 src/lib/smtp.ts              All SMTP work (nodemailer) + signature handling
 src/lib/caldav.ts            All CalDAV work (tsdav) + ical.js parsing
 src/lib/outbox.ts            Human-in-the-loop approval queue (state machine)
+src/lib/contacts.ts          Address book queries (shared by REST and MCP)
 src/lib/outbox-types.ts      Types shared by schema, server, API and client components
 src/lib/db/schema.ts         Single source of truth for the DB — no migration files
 src/lib/crypto.ts            AES-256-GCM for stored credentials
 src/lib/auth/oauth.ts        OAuth 2.1 + PKCE + DCR for MCP clients
 src/lib/auth/clerk.ts        Human auth; getCurrentUserRowId() maps Clerk → users.id
 src/app/outbox/              Approval UI
+src/app/contacts/            Address book UI
 src/components/              Client components ("use client") + the shared TopNav
 ```
 
@@ -50,9 +52,9 @@ src/components/              Client components ("use client") + the shared TopNa
 
 **Two auth realms, never mixed.** MCP clients authenticate with an OAuth bearer token
 (`resolveAccessToken`), humans authenticate with Clerk (`getCurrentUserRowId`). An MCP
-token must never reach a `/api/accounts`, `/api/calendar-accounts` or `/api/outbox` route,
-and Clerk auth must never reach `/api/mcp`. New protected routes go into the
-`isProtectedRoute` matcher in `src/middleware.ts`.
+token must never reach a `/api/accounts`, `/api/calendar-accounts`, `/api/contacts` or
+`/api/outbox` route, and Clerk auth must never reach `/api/mcp`. New protected routes go
+into the `isProtectedRoute` matcher in `src/middleware.ts`.
 
 **Every query is scoped to the user.** Load accounts through `requireAccount` /
 `requireCalendarAccount`, and always put `eq(table.userId, userId)` in the `where` of any
