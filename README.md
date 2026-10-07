@@ -33,9 +33,10 @@ One container, one domain, your server, your keys.
 - 📬 Unlimited IMAP/SMTP accounts per user, each with its own **HTML signature** (Tiptap editor, DOMPurify-sanitized)
 - 🗓️ Unlimited **CalDAV calendar accounts** per user — list/read/create/update/delete events and find free slots, fully timezone-aware (TZID + DST-correct recurrences)
 - 📇 **Address book** for the people you write to regularly — names, addresses, phones, salutation and notes, readable *and* editable by Claude over MCP
+- 🚦 **Inbox status** — every received message is *new*, *unhandled*, *handled* or *on hold until a date*, so Claude keeps track of what you have been told and what still needs an answer across sessions; a dashboard at `/status` shows the same
 - ✋ **Human-in-the-loop approvals** — outgoing mail is parked in an approval queue and only reaches SMTP after you release it in the web UI (per-account, on by default)
 - 🔒 Credentials encrypted with **AES-256-GCM**; OAuth tokens stored as **SHA-256** hashes only
-- 🧰 **35 MCP tools**: 22 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`) + 5 contact tools (`list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`)
+- 🧰 **38 MCP tools**: 25 email tools (list/read/search/send/reply/flag/move/folder ops + outbox approvals + message status) + 8 calendar tools (`list_calendar_accounts`, `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `find_free_slots`) + 5 contact tools (`list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`)
 - 🧪 **Test connection from the list** (IMAP `NOOP` + SMTP `VERIFY`, CalDAV principal-discovery) with per-account status badges and actionable error hints
 - ⚡ **Provider presets** on account creation: Gmail, Outlook / Microsoft 365, iCloud, Yahoo, Fastmail, OVH for email — iCloud, Fastmail, Nextcloud, OVH, Baïkal/generic for calendars
 - ⚠️ **Live port/SSL consistency warnings** — catches the `wrong version number` trap before it happens
@@ -153,6 +154,29 @@ An address belongs to at most one contact per user; creating a second contact wi
 same address is refused (409 in the UI, an error naming the existing contact over MCP).
 Addresses and tags are stored lower-cased. Saving a contact never sends anything, and mail
 to a contact still goes through the approval gate below.
+
+### 3b″. Track where your mail stands
+
+Claude records a processing status for every received message, and **`/status`** shows it:
+
+| Status      | Meaning                                                              |
+| ----------- | -------------------------------------------------------------------- |
+| `new`       | Nobody has told you about it yet                                     |
+| `unhandled` | You know about it, a reply is still owed                             |
+| `handled`   | Answered, or nothing to do                                           |
+| `hold`      | Parked until a date — answer later, or check back then whether the other side replied |
+
+A message without a stored status is `new`. Messages that arrived **before tracking was
+switched on** for the account (the first `db:push` with this feature, or the account's
+creation) and messages sent from the account's own address count as `handled`, so you
+start with a clean slate instead of years of "new" mail. Nothing changes automatically —
+replying does not close a message; Claude (or you, on the dashboard) decides whether it is
+`handled` or goes on `hold` to watch for an answer. When a new message answers one that is
+on hold, both the MCP tools and the dashboard point that out.
+
+The status is stored in Postgres per Message-ID, so it survives moving the message to
+another folder, but other mail clients do not see it. Hold dates are compared against
+today's date in `APP_TIMEZONE` (default `UTC`).
 
 ### 3c. Approve outgoing mail
 
@@ -322,6 +346,17 @@ without `--force` first to see what it plans.
 | `unflag_messages` | Remove `\Flagged`                                                       |
 | `set_flags`       | Add and/or remove arbitrary IMAP flags (`\Answered`, `$Important`, labels…) |
 
+### Message status
+
+| Tool                       | Purpose                                                                 |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `list_actionable_messages` | Per account: new messages (scanned over IMAP since tracking began), unhandled ones, due holds (and optionally upcoming holds). Points out new messages that answer a message on hold. |
+| `set_message_status`       | Set `new` / `unhandled` / `handled` / `hold` (+ required `hold_until` date) and an optional note for one or more UIDs |
+
+`list_messages`, `search_messages`, `get_message` and `get_thread` return `status`,
+`holdUntil`, `holdDue`, `statusNote` and `threadHold` on every message.
+`search_messages` also accepts `message_id` to find a message again after it was moved.
+
 ### Mailbox operations
 
 | Tool              | Purpose                                                                 |
@@ -392,7 +427,8 @@ mail_accounts(id, user_id, label, email,
               imap_{host,port,secure,user,password_enc},
               smtp_{host,port,secure,user,password_enc},
               signature_html, writing_style,
-              require_send_approval, approval_allowlist[], is_default)
+              require_send_approval, approval_allowlist[], is_default,
+              status_tracking_since)
 pending_messages(id, user_id, account_id, kind, status,
                  subject, to_addresses[], cc_addresses[], bcc_addresses[],
                  payload, reply_folder, reply_uid, requested_by_client_id,
@@ -403,6 +439,10 @@ calendar_accounts(id, user_id, label,
                   default_calendar_url, color, is_default)
 contacts(id, user_id, name, emails[], phones[], organization, job_title,
          salutation, notes, tags[], created_at, updated_at)
+message_statuses(id, user_id, account_id, message_key, status, hold_until, note,
+                 folder, uid, subject, from_address, message_date,
+                 updated_by_client_id, created_at, updated_at,
+                 UNIQUE(account_id, message_key))
 oauth_clients(id, client_secret_hash, redirect_uris[], token_endpoint_auth_method)
 oauth_auth_codes(code, client_id, user_id, redirect_uri,
                  code_challenge, code_challenge_method, expires_at, consumed_at)

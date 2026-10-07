@@ -1,4 +1,9 @@
-import { ImapFlow, type FetchMessageObject, type ListResponse } from "imapflow";
+import {
+  ImapFlow,
+  type FetchMessageObject,
+  type FetchQueryObject,
+  type ListResponse,
+} from "imapflow";
 import { simpleParser, type ParsedMail } from "mailparser";
 import { decrypt } from "@/lib/crypto";
 import type { MailAccount } from "@/lib/db/schema";
@@ -65,8 +70,30 @@ export interface MessageSummary {
   from: string | null;
   to: string | null;
   date: string | null;
+  /** When the server received the message — what status tracking compares against. */
+  internalDate: string | null;
   flags: string[];
+  messageId: string | null;
+  /** Bare address of the first From entry, lower-cased. */
+  fromAddress: string | null;
+  /** In-Reply-To plus References: the Message-IDs this message answers. */
+  references: string[];
   preview?: string | null;
+}
+
+/** Everything toSummary() reads. */
+const SUMMARY_FETCH: FetchQueryObject = {
+  envelope: true,
+  flags: true,
+  uid: true,
+  internalDate: true,
+  headers: ["references"],
+};
+
+/** Extract every `<id>` token from a raw References header block. */
+function parseReferencesHeader(raw: Buffer | undefined): string[] {
+  if (!raw) return [];
+  return raw.toString("utf8").match(/<[^<>\s]+>/g) ?? [];
 }
 
 export interface ListMessagesOptions {
@@ -91,11 +118,9 @@ export async function listMessages(
       if (!uids || uids.length === 0) return [];
       const tail = uids.slice(-limit).reverse();
       const results: MessageSummary[] = [];
-      for await (const msg of client.fetch(
-        { uid: tail.join(",") },
-        { envelope: true, flags: true, uid: true, internalDate: true },
-        { uid: true },
-      )) {
+      for await (const msg of client.fetch({ uid: tail.join(",") }, SUMMARY_FETCH, {
+        uid: true,
+      })) {
         results.push(toSummary(msg));
       }
       return results;
@@ -109,6 +134,8 @@ function toSummary(msg: FetchMessageObject): MessageSummary {
   const env = msg.envelope;
   const from = env?.from?.[0];
   const to = env?.to?.[0];
+  const references = parseReferencesHeader(msg.headers);
+  if (env?.inReplyTo && !references.includes(env.inReplyTo)) references.push(env.inReplyTo);
   return {
     uid: msg.uid,
     seq: msg.seq,
@@ -116,8 +143,89 @@ function toSummary(msg: FetchMessageObject): MessageSummary {
     from: from ? `${from.name ?? ""} <${from.address ?? ""}>`.trim() : null,
     to: to ? `${to.name ?? ""} <${to.address ?? ""}>`.trim() : null,
     date: env?.date ? new Date(env.date).toISOString() : null,
+    internalDate: msg.internalDate ? new Date(msg.internalDate).toISOString() : null,
     flags: msg.flags ? Array.from(msg.flags) : [],
+    messageId: env?.messageId ?? null,
+    fromAddress: from?.address ? from.address.toLowerCase() : null,
+    references,
   };
+}
+
+/** Summaries for specific UIDs of one folder; UIDs that don't exist are simply absent. */
+export async function fetchSummaries(
+  acc: AccountLike,
+  folder: string,
+  uids: number[],
+): Promise<MessageSummary[]> {
+  return withImap(acc, async (client) => {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      const results: MessageSummary[] = [];
+      for await (const msg of client.fetch({ uid: uidRange(uids) }, SUMMARY_FETCH, {
+        uid: true,
+      })) {
+        results.push(toSummary(msg));
+      }
+      return results;
+    } finally {
+      lock.release();
+    }
+  });
+}
+
+/**
+ * Folders a scan for incoming mail skips by default: outgoing, drafts,
+ * rubbish, and Gmail's "All Mail", which only duplicates the other folders.
+ */
+const NON_INBOUND_SPECIAL_USE = new Set(["\\Sent", "\\Drafts", "\\Trash", "\\Junk", "\\All"]);
+
+export interface ScanOptions {
+  /** Restrict the scan to these folder paths; default: every inbound folder. */
+  folders?: string[];
+}
+
+/**
+ * Every message received at or after `since`, across folders. One IMAP
+ * session; a folder that cannot be selected is skipped and reported.
+ */
+export async function scanMessagesSince(
+  acc: AccountLike,
+  since: Date,
+  opts: ScanOptions = {},
+): Promise<{ messages: Array<MessageSummary & { folder: string }>; failedFolders: string[] }> {
+  return withImap(acc, async (client) => {
+    const all = await client.list();
+    const wanted = opts.folders ? new Set(opts.folders) : null;
+    const folders = all.filter((f) => {
+      if (f.flags?.has("\\Noselect") || f.flags?.has("\\NonExistent")) return false;
+      if (wanted) return wanted.has(f.path);
+      return !f.specialUse || !NON_INBOUND_SPECIAL_USE.has(f.specialUse);
+    });
+
+    const messages: Array<MessageSummary & { folder: string }> = [];
+    const failedFolders: string[] = [];
+    for (const f of folders) {
+      let lock: Awaited<ReturnType<ImapFlow["getMailboxLock"]>> | null = null;
+      try {
+        lock = await client.getMailboxLock(f.path);
+        // SEARCH SINCE has day granularity — filter to the exact instant below.
+        const uids = await client.search({ since }, { uid: true });
+        if (!uids || uids.length === 0) continue;
+        for await (const msg of client.fetch({ uid: uids.join(",") }, SUMMARY_FETCH, {
+          uid: true,
+        })) {
+          const summary = toSummary(msg);
+          if (summary.internalDate && new Date(summary.internalDate) < since) continue;
+          messages.push({ ...summary, folder: f.path });
+        }
+      } catch {
+        failedFolders.push(f.path);
+      } finally {
+        lock?.release();
+      }
+    }
+    return { messages, failedFolders };
+  });
 }
 
 export interface FullMessage {
@@ -127,6 +235,7 @@ export interface FullMessage {
   to: string[];
   cc: string[];
   date: string | null;
+  internalDate: string | null;
   text: string | null;
   html: string | null;
   messageId: string | null;
@@ -150,7 +259,11 @@ export async function getMessage(
   return withImap(acc, async (client) => {
     const lock = await client.getMailboxLock(folder);
     try {
-      const msg = await client.fetchOne(String(uid), { source: true, envelope: true }, { uid: true });
+      const msg = await client.fetchOne(
+        String(uid),
+        { source: true, envelope: true, internalDate: true },
+        { uid: true },
+      );
       if (!msg || !msg.source) return null;
       const parsed: ParsedMail = await simpleParser(msg.source);
       return {
@@ -160,6 +273,7 @@ export async function getMessage(
         to: addrList(parsed.to),
         cc: addrList(parsed.cc),
         date: parsed.date ? parsed.date.toISOString() : null,
+        internalDate: msg.internalDate ? new Date(msg.internalDate).toISOString() : null,
         text: parsed.text ?? null,
         html: typeof parsed.html === "string" ? parsed.html : null,
         messageId: parsed.messageId ?? null,
@@ -315,7 +429,7 @@ export async function getThread(
       try {
         const fetched = await client.fetchOne(
           String(e.uid),
-          { envelope: true, source: true },
+          { envelope: true, source: true, internalDate: true },
           { uid: true },
         );
         const msg = fetched || null;
@@ -329,6 +443,7 @@ export async function getThread(
           to: addrList(parsed.to),
           cc: addrList(parsed.cc),
           date: parsed.date ? parsed.date.toISOString() : null,
+          internalDate: msg.internalDate ? new Date(msg.internalDate).toISOString() : null,
           text: parsed.text ?? null,
           html: typeof parsed.html === "string" ? parsed.html : null,
           messageId: parsed.messageId ?? null,
@@ -418,6 +533,8 @@ export interface SearchCriteria {
   dateFrom?: Date;
   dateTo?: Date;
   unreadOnly?: boolean;
+  /** Exact Message-ID header, e.g. "<abc@example.com>". */
+  messageId?: string;
   limit?: number;
 }
 
@@ -437,15 +554,14 @@ export async function searchMessages(
       if (crit.dateFrom) query.since = crit.dateFrom;
       if (crit.dateTo) query.before = crit.dateTo;
       if (crit.unreadOnly) query.seen = false;
+      if (crit.messageId) query.header = { "message-id": crit.messageId };
       const uids = await client.search(query, { uid: true });
       if (!uids || uids.length === 0) return [];
       const tail = uids.slice(-limit).reverse();
       const results: MessageSummary[] = [];
-      for await (const msg of client.fetch(
-        { uid: tail.join(",") },
-        { envelope: true, flags: true, uid: true },
-        { uid: true },
-      )) {
+      for await (const msg of client.fetch({ uid: tail.join(",") }, SUMMARY_FETCH, {
+        uid: true,
+      })) {
         results.push(toSummary(msg));
       }
       return results;

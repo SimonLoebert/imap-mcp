@@ -62,6 +62,17 @@ import {
   updateContact,
 } from "@/lib/contacts";
 import { contactLimits } from "@/lib/validation/contact";
+import {
+  annotate,
+  bareAddress,
+  listActionable,
+  NOTE_MAX,
+  setStatusForUids,
+  summaryTarget,
+  type StatusTarget,
+} from "@/lib/message-status";
+import { MESSAGE_STATUSES } from "@/lib/message-status-types";
+import type { MessageSummary, FullMessage } from "@/lib/imap";
 
 const contactEmailsSchema = z
   .array(z.string().trim().email())
@@ -201,6 +212,34 @@ function errorResult(err: unknown) {
   };
 }
 
+/**
+ * Attach each message's processing status. The References list is only
+ * needed to find holds in the thread, so it is dropped from the output.
+ */
+async function withStatus(
+  acc: Awaited<ReturnType<typeof requireAccount>>,
+  folder: string,
+  messages: MessageSummary[],
+) {
+  const statuses = await annotate(
+    acc,
+    messages.map((m) => summaryTarget(m, folder)),
+  );
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  return messages.map(({ references, fromAddress, ...m }, i) => ({ ...m, ...statuses[i] }));
+}
+
+function fullMessageTarget(folder: string, m: FullMessage): StatusTarget {
+  return {
+    folder,
+    uid: m.uid,
+    messageId: m.messageId,
+    fromAddress: bareAddress(m.from),
+    receivedAt: m.internalDate ?? m.date,
+    references: m.inReplyTo ? [...m.references, m.inReplyTo] : m.references,
+  };
+}
+
 function parseDate(input: string | undefined): Date | undefined {
   if (!input) return undefined;
   const d = new Date(input);
@@ -214,7 +253,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       capabilities: { tools: {} },
       instructions:
-        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. Exception: when EVERY recipient (To, Cc and Bcc) is on the account's `approvalAllowlist` (full addresses or `@domain` entries, exact domain match only), the message is sent immediately and the response says status=\"sent\". One recipient outside the list sends the whole message to approval. Always read `status` in the response instead of predicting it. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.\n\nCONTACTS — The user keeps an address book of the people they write to regularly. When the user names a recipient (\"mail Anna\"), look the person up with list_contacts and use the stored address instead of guessing one; if several contacts match, ask which one. A contact's `salutation` says how to greet them and overrides the writing style's default greeting for that recipient; `notes` carry context the user wants you to know. Before create_contact, search by address first — an address can belong to only one contact, so a duplicate is refused with the existing contact's id. Contacts are independent of the mail accounts: saving a contact never sends anything, and a contact's address still goes through the normal approval gate.",
+        "This server gives access to the current user's registered IMAP email accounts AND their CalDAV calendar accounts.\n\nAPPROVAL (HUMAN-IN-THE-LOOP) — accounts flagged `requireSendApproval` in list_accounts never send straight away: send_message and reply_message then return status=\"pending_approval\" with a `pending_id` and an `approval_url`, and the mail sits in the owner's outbox until they approve it in the web UI. Exception: when EVERY recipient (To, Cc and Bcc) is on the account's `approvalAllowlist` (full addresses or `@domain` entries, exact domain match only), the message is sent immediately and the response says status=\"sent\". One recipient outside the list sends the whole message to approval. Always read `status` in the response instead of predicting it. When that happens, tell the user the message is waiting and give them the approval URL — do NOT report the email as sent. Use list_pending_messages / get_pending_message to check the outcome and cancel_pending_message to withdraw a draft. While reviewing, the owner may add or remove attachments, so a message that goes out can carry different files than you supplied — read the `attachments` array of the pending message rather than assuming your own list survived.\n\nEMAIL — Call list_accounts first to discover email account IDs; the response carries each account's `writingStyleInstructions`, a pre-rendered directive you MUST follow verbatim when drafting via send_message or reply_message (it covers language, tone, formality, greeting, sign-off, length, emoji policy and custom user rules). IMAP folders are identified by their path; messages by their UID.\n\nMESSAGE STATUS — Every received message has a processing `status` that you maintain across sessions: \"new\" (the user has not been told about it yet — tell them), \"unhandled\" (the user knows, a reply is still owed), \"handled\" (answered or nothing to do) or \"hold\" (parked until `holdUntil`: answer later, or check then whether the other side replied). list_messages, search_messages, get_message and get_thread return `status`, `holdUntil`, `holdDue` and `statusNote` on every message. Start a triage run with list_actionable_messages: it returns new messages, unhandled ones and holds whose date has come. After informing the user about a new message, set it to \"unhandled\" with set_message_status; after a reply went out (status=\"sent\", not pending_approval) decide yourself whether it is \"handled\" or \"hold\" (to check back for an answer) — the status never changes on its own, sending or replying does not set it. When a new message carries `threadHold`, it answers a message on hold: tell the user that the awaited reply arrived and close or re-date that hold. Messages that arrived before status tracking was enabled count as \"handled\".\n\nCALENDAR — Call list_calendar_accounts to discover calendar account IDs (independent of email accounts), then list_calendars to find calendar collection URLs. Events use ETag-based optimistic concurrency: keep the `etag` returned by list_events / get_event and pass it to update_event / delete_event — a stale etag returns 412 Precondition Failed and you should re-fetch.\n\nTIMEZONES — Every event response carries `start`/`end` (UTC ISO), `startLocal`/`endLocal` (wall-clock when a TZID is set) and `tz` (IANA name, e.g. \"Europe/Paris\", or null when stored as UTC). When creating/updating events, pass `tz` to anchor the event to a real timezone — recurring events then survive DST correctly. For `start`/`end`, pass either a floating local time like \"2026-05-01T10:00:00\" interpreted in the given `tz`, or a zoned/UTC ISO (\"…Z\" / \"…+02:00\") which will be converted to the tz local time. Omit `tz` to store the event in UTC. Recurring events return their raw RRULE; pass expand_recurring=true on list_events to expand individual occurrences within the requested time range.\n\nCONTACTS — The user keeps an address book of the people they write to regularly. When the user names a recipient (\"mail Anna\"), look the person up with list_contacts and use the stored address instead of guessing one; if several contacts match, ask which one. A contact's `salutation` says how to greet them and overrides the writing style's default greeting for that recipient; `notes` carry context the user wants you to know. Before create_contact, search by address first — an address can belong to only one contact, so a duplicate is refused with the existing contact's id. Contacts are independent of the mail accounts: saving a contact never sends anything, and a contact's address still goes through the normal approval gate.",
     },
   );
 
@@ -261,7 +300,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "List messages in folder",
       description:
-        "List message headers in a folder (default: the 50 most recent).",
+        "List message headers in a folder (default: the 50 most recent). Each message carries its processing `status` (new / unhandled / handled / hold), `holdUntil`, `holdDue`, `statusNote`, and `threadHold` when it answers a message on hold.",
       inputSchema: {
         account_id: z.string().uuid(),
         folder: z.string().default("INBOX"),
@@ -279,7 +318,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           since: parseDate(since),
           unreadOnly: unread_only,
         });
-        return jsonResult({ messages });
+        return jsonResult({ messages: await withStatus(acc, folder, messages) });
       } catch (e) {
         return errorResult(e);
       }
@@ -291,7 +330,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Get full message",
       description:
-        "Fetch a full message (headers, text, HTML, attachment metadata).",
+        "Fetch a full message (headers, text, HTML, attachment metadata) with its processing `status`. Reading a message does not change its status — use set_message_status.",
       inputSchema: {
         account_id: z.string().uuid(),
         folder: z.string(),
@@ -303,8 +342,10 @@ export function buildMcpServer(ctx: McpContext): McpServer {
         const acc = await requireAccount(ctx.userId, account_id);
         const msg = await getMessage(acc, folder, uid);
         if (!msg) return errorResult(new Error("message not found"));
+        const [status] = await annotate(acc, [fullMessageTarget(folder, msg)]);
         const enriched = {
           ...msg,
+          ...status,
           attachments: msg.attachments.map((a) => ({
             ...a,
             ...attachmentDownloadUrl(ctx.userId, account_id, folder, uid, a.index),
@@ -322,7 +363,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     {
       title: "Search messages",
       description:
-        "IMAP search (from, to, subject, body, date ranges, unread only).",
+        "IMAP search (from, to, subject, body, date ranges, unread only, exact Message-ID) in one folder. Results carry the processing `status` like list_messages. Use message_id to find a message whose folder/UID changed after it was moved.",
       inputSchema: {
         account_id: z.string().uuid(),
         folder: z.string().default("INBOX"),
@@ -333,6 +374,10 @@ export function buildMcpServer(ctx: McpContext): McpServer {
         date_from: z.string().optional(),
         date_to: z.string().optional(),
         unread_only: z.boolean().optional(),
+        message_id: z
+          .string()
+          .optional()
+          .describe("Exact Message-ID header including angle brackets, e.g. \"<abc@example.com>\"."),
         limit: z.number().int().min(1).max(200).optional(),
       },
     },
@@ -348,9 +393,10 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           dateFrom: parseDate(args.date_from),
           dateTo: parseDate(args.date_to),
           unreadOnly: args.unread_only,
+          messageId: args.message_id,
           limit: args.limit,
         });
-        return jsonResult({ messages });
+        return jsonResult({ messages: await withStatus(acc, args.folder, messages) });
       } catch (e) {
         return errorResult(e);
       }
@@ -602,13 +648,18 @@ export function buildMcpServer(ctx: McpContext): McpServer {
           maxMessages: max_messages,
         });
         if (!thread) return errorResult(new Error("anchor message not found"));
+        const statuses = await annotate(
+          acc,
+          thread.messages.map((m) => fullMessageTarget(m.folder, m)),
+        );
         const enriched = {
           strategy: thread.strategy,
           threadId: thread.threadId,
           truncated: thread.truncated,
           count: thread.messages.length,
-          messages: thread.messages.map((m) => ({
+          messages: thread.messages.map((m, i) => ({
             ...m,
+            ...statuses[i],
             attachments: m.attachments.map((a) => ({
               ...a,
               ...attachmentDownloadUrl(
@@ -833,6 +884,104 @@ export function buildMcpServer(ctx: McpContext): McpServer {
         }
         const acc = await requireAccount(ctx.userId, account_id);
         const res = await setMessageFlags(acc, folder, uids, { add, remove });
+        return jsonResult(res);
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_actionable_messages",
+    {
+      title: "List messages that need attention",
+      description:
+        "Start every triage run here. Returns, per account: `new` (received since status tracking began and never given a status, newest first — tell the user about these), `unhandled` (user informed, reply still owed), `holdDue` (on hold and `holdUntil` is today or earlier — answer now or check whether a reply came), and with include_upcoming_holds also `holdUpcoming`. A new message with `threadHold` answers a held message; a tracked message's `newReplies` lists new messages answering it. Folder/UID of tracked messages are where the scan found them, else where they were when the status was set — if a UID is gone, find the message with search_messages(message_id). Sent, Drafts, Trash, Junk and All Mail are not scanned unless named in `folders`. Listing changes nothing: you must call set_message_status yourself after acting.",
+      inputSchema: {
+        account_id: z
+          .string()
+          .uuid()
+          .optional()
+          .describe("Limit to one account; default: every account of the user."),
+        folders: z
+          .array(z.string())
+          .optional()
+          .describe("Scan only these folder paths for new mail instead of every inbound folder."),
+        include_upcoming_holds: z.boolean().default(false),
+        new_limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .default(50)
+          .describe("Cap on `new` messages per account; `newTotal` gives the full count."),
+      },
+    },
+    async ({ account_id, folders, include_upcoming_holds, new_limit }) => {
+      try {
+        const ids = account_id
+          ? [account_id]
+          : (await listUserAccounts(ctx.userId)).map((a) => a.id);
+        const accounts = [];
+        for (const id of ids) {
+          const acc = await requireAccount(ctx.userId, id);
+          try {
+            accounts.push(
+              await listActionable(acc, {
+                folders,
+                includeUpcomingHolds: include_upcoming_holds,
+                newLimit: new_limit,
+              }),
+            );
+          } catch (e) {
+            // One unreachable IMAP server must not hide the other accounts.
+            accounts.push({
+              account: { id: acc.id, label: acc.label, email: acc.email },
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }
+        return jsonResult({ accounts });
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_message_status",
+    {
+      title: "Set the processing status of messages",
+      description:
+        "Record where messages stand: \"new\" (user not yet informed — re-opens a message), \"unhandled\" (user informed, reply owed), \"handled\" (done) or \"hold\" (revisit on hold_until, a YYYY-MM-DD date that is today or later — required for hold, refused otherwise). Use hold both to answer later and, after replying, to check back whether the other side answered. The status is stored on the server per Message-ID, so it survives moving the message and is visible to later sessions and in the user's dashboard; it is NOT an IMAP flag and other mail clients do not see it. Nothing changes automatically: sending a reply does not mark the original handled — set it yourself, and only once the reply really went out (status \"sent\", not \"pending_approval\"). Omitting `note` keeps the stored note; pass null to clear it.",
+      inputSchema: {
+        account_id: z.string().uuid(),
+        folder: z.string(),
+        uids: z.array(z.number().int().positive()).min(1).max(200),
+        status: z.enum(MESSAGE_STATUSES),
+        hold_until: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional()
+          .describe("YYYY-MM-DD. Required for status \"hold\", refused for the others."),
+        note: z
+          .string()
+          .max(NOTE_MAX)
+          .nullable()
+          .optional()
+          .describe("Short reason, e.g. \"waiting for the quote from Müller\". Shown on the dashboard."),
+      },
+    },
+    async ({ account_id, folder, uids, status, hold_until, note }) => {
+      try {
+        const acc = await requireAccount(ctx.userId, account_id);
+        const res = await setStatusForUids(
+          acc,
+          folder,
+          uids,
+          { status, holdUntil: hold_until, note },
+          ctx.clientId ?? null,
+        );
         return jsonResult(res);
       } catch (e) {
         return errorResult(e);
