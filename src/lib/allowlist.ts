@@ -64,6 +64,13 @@ function parseHeader(list: string[] | undefined): string[] | null {
   return parsed;
 }
 
+/** Bare, lower-cased addresses of a recipient list as SMTP will see them; throws on garbage. */
+export function parseRecipients(list: string[] | undefined): string[] {
+  const parsed = parseHeader(list);
+  if (parsed === null) throw new Error(`Unparsable recipient list: ${list?.join(", ")}`);
+  return parsed;
+}
+
 function isCovered(address: string, allowlist: ReadonlySet<string>): boolean {
   const at = address.lastIndexOf("@");
   if (at <= 0 || at === address.length - 1) return false;

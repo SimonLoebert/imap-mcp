@@ -7,11 +7,15 @@ import {
 import { simpleParser, type ParsedMail } from "mailparser";
 import { decrypt } from "@/lib/crypto";
 import type { MailAccount } from "@/lib/db/schema";
+import { openMessage, type PgpReadAccount, type PgpReadStatus } from "@/lib/pgp-receive";
 
 export type AccountLike = Pick<
   MailAccount,
   "imapHost" | "imapPort" | "imapSecure" | "imapUser" | "imapPasswordEnc"
 >;
+
+/** Readers that open full messages also need the account's PGP keys to decrypt. */
+export type ReadAccountLike = AccountLike & PgpReadAccount;
 
 function buildClient(acc: AccountLike): ImapFlow {
   return new ImapFlow({
@@ -249,10 +253,15 @@ export interface FullMessage {
     contentId: string | null;
     isInline: boolean;
   }>;
+  /**
+   * OpenPGP state, null for a plain message. When `decrypted` is true, text,
+   * html and attachments above are the decrypted content.
+   */
+  pgp: PgpReadStatus | null;
 }
 
 export async function getMessage(
-  acc: AccountLike,
+  acc: ReadAccountLike,
   folder: string,
   uid: number,
 ): Promise<FullMessage | null> {
@@ -265,7 +274,8 @@ export async function getMessage(
         { uid: true },
       );
       if (!msg || !msg.source) return null;
-      const parsed: ParsedMail = await simpleParser(msg.source);
+      const opened = await openMessage(acc, msg.source, { learnKeys: true });
+      const parsed = opened.parsed;
       return {
         uid: msg.uid,
         subject: parsed.subject ?? null,
@@ -274,8 +284,8 @@ export async function getMessage(
         cc: addrList(parsed.cc),
         date: parsed.date ? parsed.date.toISOString() : null,
         internalDate: msg.internalDate ? new Date(msg.internalDate).toISOString() : null,
-        text: parsed.text ?? null,
-        html: typeof parsed.html === "string" ? parsed.html : null,
+        text: opened.text,
+        html: opened.html,
         messageId: parsed.messageId ?? null,
         inReplyTo: parsed.inReplyTo ?? null,
         references: Array.isArray(parsed.references)
@@ -283,7 +293,7 @@ export async function getMessage(
           : parsed.references
             ? [parsed.references]
             : [],
-        attachments: (parsed.attachments ?? []).map((a, index) => ({
+        attachments: opened.attachments.map((a, index) => ({
           index,
           filename: a.filename ?? null,
           size: a.size ?? 0,
@@ -291,6 +301,7 @@ export async function getMessage(
           contentId: a.contentId ?? null,
           isInline: a.contentDisposition === "inline",
         })),
+        pgp: opened.pgp,
       };
     } finally {
       lock.release();
@@ -331,7 +342,7 @@ export interface ThreadFetchResult {
 }
 
 export async function getThread(
-  acc: AccountLike,
+  acc: ReadAccountLike,
   folder: string,
   uid: number,
   opts: ThreadOptions = {},
@@ -434,7 +445,8 @@ export async function getThread(
         );
         const msg = fetched || null;
         if (!msg?.source) continue;
-        const parsed: ParsedMail = await simpleParser(msg.source);
+        const opened = await openMessage(acc, msg.source, { learnKeys: true });
+        const parsed = opened.parsed;
         messages.push({
           folder: e.folder,
           uid: msg.uid,
@@ -444,8 +456,8 @@ export async function getThread(
           cc: addrList(parsed.cc),
           date: parsed.date ? parsed.date.toISOString() : null,
           internalDate: msg.internalDate ? new Date(msg.internalDate).toISOString() : null,
-          text: parsed.text ?? null,
-          html: typeof parsed.html === "string" ? parsed.html : null,
+          text: opened.text,
+          html: opened.html,
           messageId: parsed.messageId ?? null,
           inReplyTo: parsed.inReplyTo ?? null,
           references: Array.isArray(parsed.references)
@@ -453,7 +465,7 @@ export async function getThread(
             : parsed.references
               ? [parsed.references]
               : [],
-          attachments: (parsed.attachments ?? []).map((a, index) => ({
+          attachments: opened.attachments.map((a, index) => ({
             index,
             filename: a.filename ?? null,
             size: a.size ?? 0,
@@ -461,6 +473,7 @@ export async function getThread(
             contentId: a.contentId ?? null,
             isInline: a.contentDisposition === "inline",
           })),
+          pgp: opened.pgp,
         });
       } finally {
         lock.release();
@@ -493,7 +506,7 @@ export async function getThread(
 }
 
 export async function getAttachment(
-  acc: AccountLike,
+  acc: ReadAccountLike,
   folder: string,
   uid: number,
   index: number,
@@ -503,8 +516,9 @@ export async function getAttachment(
     try {
       const msg = await client.fetchOne(String(uid), { source: true }, { uid: true });
       if (!msg || !msg.source) return null;
-      const parsed: ParsedMail = await simpleParser(msg.source);
-      const att = parsed.attachments?.[index];
+      // Same opener as getMessage, so indices match the decrypted attachment list.
+      const { attachments } = await openMessage(acc, msg.source);
+      const att = attachments[index];
       if (!att) return null;
       const buf = Buffer.isBuffer(att.content)
         ? att.content

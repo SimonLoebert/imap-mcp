@@ -4,7 +4,9 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { SignatureEditor } from "./SignatureEditor";
 import { WritingStyleEditor } from "./WritingStyleEditor";
+import { PgpKeyPanel } from "./PgpKeyPanel";
 import type { WritingStyle } from "@/lib/writing-style";
+import type { PgpKeyInfo } from "@/lib/pgp";
 
 export interface AccountFormValues {
   label: string;
@@ -24,6 +26,9 @@ export interface AccountFormValues {
   writingStyle: WritingStyle;
   requireSendApproval: boolean;
   approvalAllowlist: string[];
+  pgpSignByDefault: boolean;
+  pgpAttachPublicKey: boolean;
+  pgpAutoEncrypt: boolean;
   isDefault: boolean;
 }
 
@@ -45,6 +50,9 @@ const empty: AccountFormValues = {
   writingStyle: {},
   requireSendApproval: true,
   approvalAllowlist: [],
+  pgpSignByDefault: true,
+  pgpAttachPublicKey: true,
+  pgpAutoEncrypt: true,
   isDefault: false,
 };
 
@@ -139,10 +147,13 @@ export function AccountForm({
   mode,
   accountId,
   initial,
+  pgpKey,
 }: {
   mode: "create" | "edit";
   accountId?: string;
   initial?: Partial<AccountFormValues>;
+  /** Public facts about the account's current key (edit mode only). */
+  pgpKey?: PgpKeyInfo | null;
 }) {
   const router = useRouter();
   const [values, setValues] = useState<AccountFormValues>({ ...empty, ...initial });
@@ -349,6 +360,48 @@ export function AccountForm({
               cover sub.example.com.
             </p>
           </div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginBottom: 4 }}>PGP signing &amp; encryption</h3>
+        <p className="muted" style={{ fontSize: 13, marginBottom: 12 }}>
+          Outgoing mail is signed as PGP/MIME with this account&apos;s own key, so recipients can
+          verify it came from you and was not altered. Mail to people whose key is in your{" "}
+          <a href="/keys">PGP keyring</a> can be encrypted as well; encrypted mail you receive
+          is decrypted with this key.
+        </p>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={values.pgpSignByDefault}
+            onChange={(e) => update("pgpSignByDefault", e.target.checked)}
+          />
+          Sign outgoing mail by default
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={values.pgpAttachPublicKey}
+            onChange={(e) => update("pgpAttachPublicKey", e.target.checked)}
+          />
+          Attach my public key to outgoing mail
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={values.pgpAutoEncrypt}
+            onChange={(e) => update("pgpAutoEncrypt", e.target.checked)}
+          />
+          Encrypt automatically when every recipient has a key (the subject stays readable)
+        </label>
+        {mode === "create" ? (
+          <p className="muted" style={{ fontSize: 13, marginTop: 12 }}>
+            A key for this address is generated when the account is created; you can replace
+            it with your own key afterwards.
+          </p>
+        ) : (
+          accountId && <PgpKeyPanel accountId={accountId} pgpKey={pgpKey ?? null} />
         )}
       </div>
 

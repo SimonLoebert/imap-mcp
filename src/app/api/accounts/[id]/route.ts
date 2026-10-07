@@ -19,9 +19,12 @@ export async function GET(
     .where(and(eq(mailAccounts.id, id), eq(mailAccounts.userId, userId)))
     .limit(1);
   if (!row) return NextResponse.json({ error: "not found" }, { status: 404 });
-  const { imapPasswordEnc, smtpPasswordEnc, ...safe } = row;
+  const { imapPasswordEnc, smtpPasswordEnc, pgpPrivateKeyEnc, pgpPreviousKeysEnc, ...safe } =
+    row;
   void imapPasswordEnc;
   void smtpPasswordEnc;
+  void pgpPrivateKeyEnc;
+  void pgpPreviousKeysEnc;
   return NextResponse.json({ account: safe });
 }
 
@@ -74,6 +77,9 @@ export async function PATCH(
     patch.requireSendApproval = input.requireSendApproval;
   }
   if (input.approvalAllowlist !== undefined) patch.approvalAllowlist = input.approvalAllowlist;
+  if (input.pgpSignByDefault !== undefined) patch.pgpSignByDefault = input.pgpSignByDefault;
+  if (input.pgpAttachPublicKey !== undefined) patch.pgpAttachPublicKey = input.pgpAttachPublicKey;
+  if (input.pgpAutoEncrypt !== undefined) patch.pgpAutoEncrypt = input.pgpAutoEncrypt;
   if (input.isDefault !== undefined) patch.isDefault = input.isDefault;
 
   await db

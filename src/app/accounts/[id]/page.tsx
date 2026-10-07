@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { mailAccounts } from "@/lib/db/schema";
 import { getCurrentUserRowId } from "@/lib/auth/clerk";
 import { AccountForm } from "@/components/AccountForm";
+import { describePublicKey } from "@/lib/pgp";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,7 @@ export default async function EditAccountPage({
     .where(and(eq(mailAccounts.id, id), eq(mailAccounts.userId, userId)))
     .limit(1);
   if (!acc) notFound();
+  const pgpKey = acc.pgpPublicKey ? await describePublicKey(acc.pgpPublicKey) : null;
 
   return (
     <div>
@@ -51,8 +53,12 @@ export default async function EditAccountPage({
           writingStyle: acc.writingStyle ?? {},
           requireSendApproval: acc.requireSendApproval,
           approvalAllowlist: acc.approvalAllowlist,
+          pgpSignByDefault: acc.pgpSignByDefault,
+          pgpAttachPublicKey: acc.pgpAttachPublicKey,
+          pgpAutoEncrypt: acc.pgpAutoEncrypt,
           isDefault: acc.isDefault,
         }}
+        pgpKey={pgpKey}
       />
     </div>
   );
