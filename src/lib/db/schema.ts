@@ -6,6 +6,7 @@ import {
   boolean,
   timestamp,
   jsonb,
+  date,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -15,6 +16,7 @@ import type {
   PendingMessagePayload,
   PendingMessageStatus,
 } from "@/lib/outbox-types";
+import type { MessageStatus } from "@/lib/message-status-types";
 
 export const users = pgTable(
   "users",
@@ -61,6 +63,15 @@ export const mailAccounts = pgTable(
      */
     approvalAllowlist: text("approval_allowlist").array().notNull().default([]),
     isDefault: boolean("is_default").notNull().default(false),
+    /**
+     * Messages that arrived before this instant and carry no stored status
+     * count as `handled`, so turning status tracking on does not flood the
+     * client with years of old mail. A push fills existing rows with the time
+     * of the push; new accounts start tracking when they are created.
+     */
+    statusTrackingSince: timestamp("status_tracking_since", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -209,6 +220,45 @@ export const contacts = pgTable(
   (t) => [index("contacts_user_id_idx").on(t.userId)],
 );
 
+/**
+ * Processing status of received messages (see src/lib/message-status.ts).
+ * Keyed by Message-ID rather than folder/UID so the status survives moving the
+ * message to another folder; folder, uid and the header fields are a snapshot
+ * from the last time the status was set, for the dashboard. A message without
+ * a row is `new` (or `handled` when it predates `statusTrackingSince`).
+ */
+export const messageStatuses = pgTable(
+  "message_statuses",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => mailAccounts.id, { onDelete: "cascade" }),
+    /** Message-ID header with angle brackets, or `uid:<folder>:<uid>` when the message has none. */
+    messageKey: text("message_key").notNull(),
+    status: text("status").$type<MessageStatus>().notNull(),
+    /** Required while status = 'hold', null otherwise. */
+    holdUntil: date("hold_until", { mode: "string" }),
+    note: text("note"),
+    folder: text("folder").notNull(),
+    uid: integer("uid").notNull(),
+    subject: text("subject"),
+    fromAddress: text("from_address"),
+    messageDate: timestamp("message_date", { withTimezone: true }),
+    /** OAuth client that last set the status; null when set from the web UI. */
+    updatedByClientId: text("updated_by_client_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("message_statuses_account_key_idx").on(t.accountId, t.messageKey),
+    index("message_statuses_user_status_idx").on(t.userId, t.status),
+  ],
+);
+
 export type User = typeof users.$inferSelect;
 export type PendingMessage = typeof pendingMessages.$inferSelect;
 export type NewPendingMessage = typeof pendingMessages.$inferInsert;
@@ -216,6 +266,7 @@ export type MailAccount = typeof mailAccounts.$inferSelect;
 export type NewMailAccount = typeof mailAccounts.$inferInsert;
 export type CalendarAccount = typeof calendarAccounts.$inferSelect;
 export type NewCalendarAccount = typeof calendarAccounts.$inferInsert;
+export type MessageStatusRow = typeof messageStatuses.$inferSelect;
 export type Contact = typeof contacts.$inferSelect;
 export type NewContact = typeof contacts.$inferInsert;
 export type OAuthClient = typeof oauthClients.$inferSelect;

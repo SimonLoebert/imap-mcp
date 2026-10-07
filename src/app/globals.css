@@ -641,3 +641,20 @@ kbd {
   white-space: nowrap;
   border: 0;
 }
+
+/* Inbox status dashboard: four counters in a row. */
+.grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+@media (max-width: 640px) {
+  .grid-4 {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+.stat-value {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.1;
+}
